@@ -67,10 +67,11 @@ function intervalForLevel(level) {
   );
 }
 
-function endedState(state) {
+function endedState(state, outcome) {
   return {
     ...state,
     status: 'game-over',
+    outcome,
     turnAccepted: false,
   };
 }
@@ -176,13 +177,13 @@ export function stepGame(state, random = Math.random) {
     nextHead.y < 0 ||
     nextHead.y >= BOARD_SIZE;
 
-  if (hitWall) return endedState(state);
+  if (hitWall) return endedState(state, 'wall');
 
   const ateFood = state.food !== null && sameCell(nextHead, state.food);
   const collisionBody = ateFood ? state.snake : state.snake.slice(0, -1);
   const hitSelf = collisionBody.some((cell) => sameCell(cell, nextHead));
 
-  if (hitSelf) return endedState(state);
+  if (hitSelf) return endedState(state, 'self');
 
   const nextSnake = ateFood
     ? [nextHead, ...state.snake]
@@ -204,6 +205,7 @@ export function stepGame(state, random = Math.random) {
       snake: nextSnake,
       food: null,
       status: 'won',
+      outcome: 'won',
       score: MAX_SCORE,
       foodCount: MAX_FOOD_COUNT,
       level: MAX_LEVEL,

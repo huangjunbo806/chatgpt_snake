@@ -277,6 +277,7 @@ describe('碰撞规则', () => {
     const result = stepGame(state, () => 0);
 
     assert.equal(result.status, 'game-over');
+    assert.equal(result.outcome, 'wall');
     assert.deepEqual(result.snake, state.snake);
     assert.equal(result.snake.some((cell) => cell.x === 20), false);
     assert.deepEqual(state, before);
@@ -298,6 +299,7 @@ describe('碰撞规则', () => {
     const result = stepGame(state, () => 0);
 
     assert.equal(result.status, 'game-over');
+    assert.equal(result.outcome, 'self');
     assert.deepEqual(result.snake, state.snake);
   });
 
@@ -423,6 +425,7 @@ describe('满盘胜利', () => {
     assert.equal(state.snake.length, 399);
     assert.equal(result.snake.length, 400);
     assert.equal(result.status, 'won');
+    assert.equal(result.outcome, 'won');
     assert.equal(result.score, MAX_SCORE);
     assert.equal(result.foodCount, 396);
     assert.equal(result.level, 8);
