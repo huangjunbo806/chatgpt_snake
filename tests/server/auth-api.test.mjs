@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, test } from 'node:test';
@@ -33,6 +34,67 @@ class FlakyDestroyMemoryStore extends session.MemoryStore {
   destroy(sid, callback) {
     if (this.failDestroy) {
       callback(new Error('sessionId=sid-secret cookie=app_session hash=store-secret'));
+      return;
+    }
+    super.destroy(sid, callback);
+  }
+}
+
+class FailingSetMemoryStore extends FlakyDestroyMemoryStore {
+  constructor({
+    failures = 0,
+    alwaysFail = false,
+    failAtCalls = [],
+    destroyFailures = 0,
+  } = {}) {
+    super();
+    this.remainingFailures = failures;
+    this.alwaysFail = alwaysFail;
+    this.failAtCalls = new Set(failAtCalls);
+    this.remainingDestroyFailures = destroyFailures;
+    this.setCalls = [];
+    this.destroyCalls = [];
+    this.generatedSessionIds = [];
+  }
+
+  failNextSet() {
+    this.remainingFailures += 1;
+  }
+
+  failNextDestroy() {
+    this.remainingDestroyFailures += 1;
+  }
+
+  regenerate(req, callback) {
+    super.regenerate(req, (error) => {
+      this.generatedSessionIds.push(req.sessionID);
+      callback(error);
+    });
+  }
+
+  set(sid, value, callback) {
+    this.setCalls.push(sid);
+    const callNumber = this.setCalls.length;
+    if (this.alwaysFail
+      || this.remainingFailures > 0
+      || this.failAtCalls.has(callNumber)) {
+      this.remainingFailures = Math.max(0, this.remainingFailures - 1);
+      this.sessions[sid] = JSON.stringify(value);
+      setImmediate(() => {
+        callback(new Error('sessionId=set-secret cookie=app_session hash=store-secret'));
+      });
+      return;
+    }
+    super.set(sid, value, callback);
+  }
+
+  destroy(sid, callback) {
+    this.destroyCalls.push(sid);
+    if (this.remainingDestroyFailures > 0) {
+      this.remainingDestroyFailures -= 1;
+      setImmediate(() => {
+        callback(new Error('sessionId=destroy-secret cookie=app_session hash=store-secret'));
+      });
       return;
     }
     super.destroy(sid, callback);
@@ -164,12 +226,20 @@ async function buildHarness({
     logger,
     requestIdFactory,
   });
+  const lateErrors = [];
+  app.use((error, req, res, next) => {
+    lateErrors.push({ error, headersSent: res.headersSent });
+    if (!res.headersSent) {
+      next(error);
+    }
+  });
 
   return {
     app,
     authService: service,
     authThrottle,
     fastPassword,
+    lateErrors,
     logger,
     passwordService,
     store,
@@ -194,11 +264,33 @@ function cookiePair(response) {
   return response.headers['set-cookie'][0].split(';', 1)[0];
 }
 
+function signedSessionCookie(sessionId) {
+  const signature = createHmac('sha256', SESSION_SECRET)
+    .update(sessionId)
+    .digest('base64')
+    .replace(/=+$/u, '');
+  return `app_session=${encodeURIComponent(`s:${sessionId}.${signature}`)}`;
+}
+
 function assertError(response, status, code, message) {
   assert.equal(response.status, status);
   assert.equal(response.body.error.code, code);
   assert.equal(response.body.error.message, message);
   assert.ok(response.body.error.requestId);
+}
+
+async function settleWithin(promise, timeoutMs, message) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 describe('认证 HTTP API', () => {
@@ -212,6 +304,7 @@ describe('认证 HTTP API', () => {
     });
 
     assert.equal(registered.status, 201);
+    assert.equal(registered.headers['cache-control'], 'no-store');
     assert.deepEqual(registered.body, { data: { user: { id: '1', username: 'alice_1' } } });
     assert.equal('passwordHash' in registered.body.data.user, false);
     assert.equal('bestScore' in registered.body.data.user, false);
@@ -225,6 +318,7 @@ describe('认证 HTTP API', () => {
     assert.ok(Date.parse(expires) - Date.now() > (7 * 24 * 60 * 60 * 1000) - 10_000);
 
     const me = await agent.get('/api/auth/me');
+    assert.equal(me.headers['cache-control'], 'no-store');
     assert.deepEqual(me.body, {
       data: { authenticated: true, user: { id: '1', username: 'alice_1' } },
     });
@@ -234,6 +328,7 @@ describe('认证 HTTP API', () => {
       password: 'another valid password',
     });
     assertError(duplicate, 409, 'USERNAME_TAKEN', '用户名已被占用');
+    assert.equal(duplicate.headers['cache-control'], 'no-store');
 
     const loggedOut = await protectedPost(agent, '/api/auth/logout', {});
     assert.equal(loggedOut.status, 204);
@@ -277,6 +372,174 @@ describe('认证 HTTP API', () => {
     assert.deepEqual(oldSession.body, { data: { authenticated: false, user: null } });
     assert.equal(oldSession.headers['set-cookie'], undefined);
     assert.equal(currentSession.body.data.authenticated, true);
+  });
+
+  test('注册和登录成功时各只 set 一次，不在响应收尾重复保存', async () => {
+    const store = new FailingSetMemoryStore();
+    const { app, lateErrors } = await buildHarness({ store });
+    const agent = request.agent(app);
+
+    const registered = await protectedPost(agent, '/api/auth/register', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+    const loggedIn = await protectedPost(agent, '/api/auth/login', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+    await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+
+    assert.equal(registered.status, 201);
+    assert.equal(loggedIn.status, 200);
+    assert.equal(store.setCalls.length, 2);
+    assert.notEqual(store.setCalls[0], store.setCalls[1]);
+    assert.deepEqual(lateErrors, []);
+  });
+
+  test('若第二次 set 才失败，成功建会话也不会触发响应收尾保存或迟到错误', { timeout: 3_000 }, async () => {
+    const store = new FailingSetMemoryStore({ failAtCalls: [2] });
+    const { app, lateErrors } = await buildHarness({ store });
+    const agent = request.agent(app);
+
+    const registered = await protectedPost(agent, '/api/auth/register', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+    await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+
+    assert.equal(registered.status, 201);
+    assert.equal(store.setCalls.length, 1);
+    assert.deepEqual(lateErrors, []);
+    const me = await agent.get('/api/auth/me');
+    assert.equal(me.body.data.authenticated, true);
+  });
+
+  test('regenerate destroy 首次失败时重试旧 SID、销毁新 SID，旧/新 Cookie 都失效', { timeout: 3_000 }, async () => {
+    const store = new FailingSetMemoryStore();
+    const { app, lateErrors } = await buildHarness({ store });
+    const agent = request.agent(app);
+    const registered = await protectedPost(agent, '/api/auth/register', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+    const oldCookie = cookiePair(registered);
+    const oldSessionId = store.setCalls.at(-1);
+    const destroyCallsBeforeFailure = store.destroyCalls.length;
+    store.failNextDestroy();
+
+    const failed = await protectedPost(agent, '/api/auth/login', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+    await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+
+    assertError(failed, 500, 'INTERNAL_ERROR', '服务器内部错误');
+    assert.match(failed.headers['set-cookie'][0], /^app_session=;/u);
+    const newSessionId = store.generatedSessionIds.at(-1);
+    assert.notEqual(newSessionId, oldSessionId);
+    assert.deepEqual(store.destroyCalls.slice(destroyCallsBeforeFailure), [
+      oldSessionId,
+      oldSessionId,
+      newSessionId,
+    ]);
+    assert.deepEqual(lateErrors, []);
+
+    for (const cookie of [oldCookie, signedSessionCookie(newSessionId)]) {
+      const me = await request(app).get('/api/auth/me').set('Cookie', cookie);
+      assert.deepEqual(me.body, { data: { authenticated: false, user: null } });
+    }
+  });
+
+  test('注册 Session 首次保存失败时只 set 一次、销毁新 SID、清 Cookie 且不能复用登录态', { timeout: 3_000 }, async () => {
+    const store = new FailingSetMemoryStore();
+    const { app, logger } = await buildHarness({ store });
+    const agent = request.agent(app);
+    const initial = await protectedPost(agent, '/api/auth/register', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+    const oldCookie = cookiePair(initial);
+    const setCallsBeforeFailure = store.setCalls.length;
+    const destroyCallsBeforeFailure = store.destroyCalls.length;
+    store.failNextSet();
+
+    const failed = await protectedPost(agent, '/api/auth/register', {
+      username: 'bob',
+      password: VALID_PASSWORD,
+    });
+
+    assertError(failed, 500, 'INTERNAL_ERROR', '服务器内部错误');
+    assert.equal(store.setCalls.length, setCallsBeforeFailure + 1);
+    assert.equal(store.destroyCalls.length, destroyCallsBeforeFailure + 2);
+    const failedSessionId = store.setCalls[setCallsBeforeFailure];
+    assert.equal(store.destroyCalls.at(-1), failedSessionId);
+    assert.equal(failed.headers['set-cookie'].length, 1);
+    assert.match(failed.headers['set-cookie'][0], /^app_session=;/u);
+    assert.doesNotMatch(failed.text, /set-secret|app_session|store-secret/iu);
+    assert.doesNotMatch(inspect(logger.entries), /set-secret|app_session|store-secret/iu);
+
+    for (const cookie of [oldCookie, cookiePair(failed), signedSessionCookie(failedSessionId)]) {
+      const me = await request(app).get('/api/auth/me').set('Cookie', cookie);
+      assert.deepEqual(me.body, { data: { authenticated: false, user: null } });
+    }
+  });
+
+  test('登录 Session 首次保存失败时旧/响应 Cookie 均不能认证，活动 SID 不被遗留', { timeout: 3_000 }, async () => {
+    const store = new FailingSetMemoryStore();
+    const { app } = await buildHarness({ store });
+    const agent = request.agent(app);
+    const registered = await protectedPost(agent, '/api/auth/register', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+    const oldCookie = cookiePair(registered);
+    const setCallsBeforeFailure = store.setCalls.length;
+    const destroyCallsBeforeFailure = store.destroyCalls.length;
+    store.failNextSet();
+
+    const failed = await protectedPost(agent, '/api/auth/login', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+
+    assertError(failed, 500, 'INTERNAL_ERROR', '服务器内部错误');
+    assert.equal(store.setCalls.length, setCallsBeforeFailure + 1);
+    assert.equal(store.destroyCalls.length, destroyCallsBeforeFailure + 2);
+    assert.equal(failed.headers['set-cookie'].length, 1);
+    assert.match(failed.headers['set-cookie'][0], /^app_session=;/u);
+
+    const newSessionCookie = signedSessionCookie(store.setCalls.at(-1));
+    for (const cookie of [oldCookie, cookiePair(failed), newSessionCookie]) {
+      const me = await request(app).get('/api/auth/me').set('Cookie', cookie);
+      assert.deepEqual(me.body, { data: { authenticated: false, user: null } });
+    }
+  });
+
+  test('持续保存失败也只走首次错误路径，不在响应收尾二次 set', { timeout: 3_000 }, async () => {
+    const store = new FailingSetMemoryStore({ alwaysFail: true });
+    const harness = await buildHarness({ store });
+    const passwordHash = await harness.passwordService.hash(VALID_PASSWORD);
+    await harness.users.repository.create({ username: 'alice', passwordHash });
+
+    const failed = await protectedPost(request(harness.app), '/api/auth/login', {
+      username: 'alice',
+      password: VALID_PASSWORD,
+    });
+
+    await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+
+    assertError(failed, 500, 'INTERNAL_ERROR', '服务器内部错误');
+    assert.equal(store.setCalls.length, 1);
+    assert.equal(store.destroyCalls.at(-1), store.setCalls[0]);
+    assert.equal(failed.headers['set-cookie'].length, 1);
+    assert.match(failed.headers['set-cookie'][0], /^app_session=;/u);
+    assert.doesNotMatch(failed.text, /set-secret|app_session|store-secret/iu);
+    assert.doesNotMatch(inspect(harness.logger.entries), /set-secret|app_session|store-secret/iu);
+    assert.deepEqual(harness.lateErrors, []);
+    const capturedNewSid = await request(harness.app)
+      .get('/api/auth/me')
+      .set('Cookie', signedSessionCookie(store.setCalls[0]));
+    assert.deepEqual(capturedNewSid.body, { data: { authenticated: false, user: null } });
   });
 
   test('游客 me 不创建 Cookie；已删除用户销毁陈旧 Session 并清 Cookie', async () => {
@@ -444,10 +707,19 @@ describe('认证 HTTP API', () => {
     }));
     const responsesPromise = Promise.all(pending);
 
-    await fiveCallsReached;
-    await new Promise((resolve) => setImmediate(resolve));
-    releaseService();
-    const responses = await responsesPromise;
+    let gateError = null;
+    try {
+      await settleWithin(fiveCallsReached, 2_000, '等待 5 个登录请求进入 service 超时');
+      await new Promise((resolve) => setImmediate(resolve));
+    } catch (error) {
+      gateError = error;
+    } finally {
+      releaseService();
+    }
+    const responses = await settleWithin(responsesPromise, 2_000, '等待并发登录响应完成超时');
+    if (gateError) {
+      throw gateError;
+    }
 
     assert.equal(serviceCalls, 5);
     assert.equal(responses.filter(({ status }) => status === 401).length, 5);

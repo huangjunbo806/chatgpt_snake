@@ -48,13 +48,13 @@ export function createAuthService({
     const parsed = parseLoginInput(body);
 
     if (!parsed.valid) {
-      await passwordService.verify(dummyPasswordHash, parsed.password);
+      await passwordService.verify(dummyPasswordHash, parsed.verificationPassword);
       throw invalidCredentials();
     }
 
     const credentials = await userRepository.findCredentialsByUsername(parsed.username);
     const passwordHash = credentials?.passwordHash ?? dummyPasswordHash;
-    const passwordMatches = await passwordService.verify(passwordHash, parsed.password);
+    const passwordMatches = await passwordService.verify(passwordHash, parsed.verificationPassword);
 
     if (!credentials || !passwordMatches) {
       throw invalidCredentials();

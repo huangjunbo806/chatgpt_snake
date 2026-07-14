@@ -3,6 +3,7 @@ import { AppError } from '../errors.js';
 const USERNAME_PATTERN = /^[a-z0-9_]{3,20}$/u;
 const PASSWORD_MIN_LENGTH = 15;
 const PASSWORD_MAX_LENGTH = 128;
+const INVALID_PASSWORD_VERIFICATION_VALUE = 'invalid-password-input';
 
 function invalidInput(message = '输入内容不符合要求') {
   return new AppError({
@@ -29,13 +30,31 @@ function hasExactCredentialsKeys(body) {
     && keys.includes('password');
 }
 
-function isValidPassword(password) {
-  if (typeof password !== 'string') {
-    return false;
+function isWellFormedUtf16(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
+      const nextCodeUnit = value.charCodeAt(index + 1);
+      if (!(nextCodeUnit >= 0xDC00 && nextCodeUnit <= 0xDFFF)) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xDC00 && codeUnit <= 0xDFFF) {
+      return false;
+    }
   }
+  return true;
+}
 
+function hasValidPasswordLength(password) {
   const length = [...password].length;
   return length >= PASSWORD_MIN_LENGTH && length <= PASSWORD_MAX_LENGTH;
+}
+
+function isValidPassword(password) {
+  return typeof password === 'string'
+    && isWellFormedUtf16(password)
+    && hasValidPasswordLength(password);
 }
 
 export function normalizeUsernameCandidate(value) {
@@ -79,11 +98,17 @@ export function parseLoginInput(body) {
   }
 
   const username = normalizeUsernameCandidate(body.username);
-  const valid = username !== null && isValidPassword(body.password);
+  const passwordIsWellFormed = isWellFormedUtf16(body.password);
+  const valid = username !== null
+    && passwordIsWellFormed
+    && hasValidPasswordLength(body.password);
 
   return Object.freeze({
     valid,
     username,
     password: body.password,
+    verificationPassword: passwordIsWellFormed
+      ? body.password
+      : INVALID_PASSWORD_VERIFICATION_VALUE,
   });
 }

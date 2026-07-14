@@ -13,19 +13,94 @@ function reservationResult({ blocked, remaining, retryAfterMs, reservation }) {
 }
 
 // 计数只保存在当前 Node.js 进程内；多进程部署需要在组合层替换为共享限流器。
-export function createFixedWindowLimiter({ limit, windowMs, now = Date.now } = {}) {
+export function createFixedWindowLimiter({
+  limit,
+  windowMs,
+  now = Date.now,
+  maxEntries = 10_000,
+  cleanupBudget = 16,
+} = {}) {
   validatePositiveInteger(limit, 'limit');
   validatePositiveInteger(windowMs, 'windowMs');
+  validatePositiveInteger(maxEntries, 'maxEntries');
+  validatePositiveInteger(cleanupBudget, 'cleanupBudget');
 
   const entries = new Map();
   const reservations = new WeakMap();
+  let cleanupHead = null;
+  let cleanupTail = null;
+  let cleanupCursor = null;
 
-  function removeExpired(currentTime) {
-    for (const [key, entry] of entries) {
+  function appendEntry(entry) {
+    entry.previous = cleanupTail;
+    entry.next = null;
+    if (cleanupTail) {
+      cleanupTail.next = entry;
+    } else {
+      cleanupHead = entry;
+    }
+    cleanupTail = entry;
+    cleanupCursor ??= entry;
+  }
+
+  function removeEntry(key, entry) {
+    if (entries.get(key) !== entry) {
+      return false;
+    }
+
+    const cursorAfterRemoval = entry.next ?? cleanupHead;
+    entries.delete(key);
+
+    if (entry.previous) {
+      entry.previous.next = entry.next;
+    } else {
+      cleanupHead = entry.next;
+    }
+    if (entry.next) {
+      entry.next.previous = entry.previous;
+    } else {
+      cleanupTail = entry.previous;
+    }
+
+    if (cleanupCursor === entry) {
+      cleanupCursor = cursorAfterRemoval === entry ? null : cursorAfterRemoval;
+    }
+    entry.previous = null;
+    entry.next = null;
+    return true;
+  }
+
+  function removeExpiredIncrementally(currentTime) {
+    for (let inspected = 0; inspected < cleanupBudget && cleanupHead; inspected += 1) {
+      cleanupCursor ??= cleanupHead;
+      const entry = cleanupCursor;
+      cleanupCursor = entry.next ?? cleanupHead;
       if (entry.expiresAt <= currentTime) {
-        entries.delete(key);
+        removeEntry(entry.key, entry);
       }
     }
+  }
+
+  function getActiveEntry(key, currentTime) {
+    const entry = entries.get(key);
+    if (entry?.expiresAt <= currentTime) {
+      removeEntry(key, entry);
+      return null;
+    }
+    return entry ?? null;
+  }
+
+  function capacityResult() {
+    return result({ blocked: true, remaining: 0, retryAfterMs: windowMs });
+  }
+
+  function capacityReservationResult() {
+    return reservationResult({
+      blocked: true,
+      remaining: 0,
+      retryAfterMs: windowMs,
+      reservation: null,
+    });
   }
 
   function entryCount(entry) {
@@ -34,10 +109,13 @@ export function createFixedWindowLimiter({ limit, windowMs, now = Date.now } = {
 
   function check(key) {
     const currentTime = now();
-    removeExpired(currentTime);
-    const entry = entries.get(key);
+    removeExpiredIncrementally(currentTime);
+    const entry = getActiveEntry(key, currentTime);
 
     if (!entry) {
+      if (entries.size >= maxEntries) {
+        return capacityResult();
+      }
       return result({ blocked: false, remaining: limit, retryAfterMs: 0 });
     }
 
@@ -52,12 +130,23 @@ export function createFixedWindowLimiter({ limit, windowMs, now = Date.now } = {
 
   function reserve(key) {
     const currentTime = now();
-    removeExpired(currentTime);
-    let entry = entries.get(key);
+    removeExpiredIncrementally(currentTime);
+    let entry = getActiveEntry(key, currentTime);
 
     if (!entry) {
-      entry = { committed: 0, pending: 0, expiresAt: currentTime + windowMs };
+      if (entries.size >= maxEntries) {
+        return capacityReservationResult();
+      }
+      entry = {
+        key,
+        committed: 0,
+        pending: 0,
+        expiresAt: currentTime + windowMs,
+        previous: null,
+        next: null,
+      };
       entries.set(key, entry);
+      appendEntry(entry);
     }
 
     const count = entryCount(entry);
@@ -89,8 +178,8 @@ export function createFixedWindowLimiter({ limit, windowMs, now = Date.now } = {
     reservations.delete(reservation);
 
     const currentTime = now();
-    removeExpired(currentTime);
-    if (entries.get(reserved.key) !== reserved.entry) {
+    removeExpiredIncrementally(currentTime);
+    if (getActiveEntry(reserved.key, currentTime) !== reserved.entry) {
       return false;
     }
 
@@ -107,14 +196,14 @@ export function createFixedWindowLimiter({ limit, windowMs, now = Date.now } = {
     reservations.delete(reservation);
 
     const currentTime = now();
-    removeExpired(currentTime);
-    if (entries.get(reserved.key) !== reserved.entry) {
+    removeExpiredIncrementally(currentTime);
+    if (getActiveEntry(reserved.key, currentTime) !== reserved.entry) {
       return false;
     }
 
     reserved.entry.pending -= 1;
     if (entryCount(reserved.entry) === 0) {
-      entries.delete(reserved.key);
+      removeEntry(reserved.key, reserved.entry);
     }
     return true;
   }
@@ -128,20 +217,25 @@ export function createFixedWindowLimiter({ limit, windowMs, now = Date.now } = {
   }
 
   function reset(key) {
-    entries.delete(key);
+    const currentTime = now();
+    removeExpiredIncrementally(currentTime);
+    const entry = getActiveEntry(key, currentTime);
+    if (entry) {
+      removeEntry(key, entry);
+    }
   }
 
   function clearCommitted(key) {
     const currentTime = now();
-    removeExpired(currentTime);
-    const entry = entries.get(key);
+    removeExpiredIncrementally(currentTime);
+    const entry = getActiveEntry(key, currentTime);
     if (!entry) {
       return;
     }
 
     entry.committed = 0;
     if (entry.pending === 0) {
-      entries.delete(key);
+      removeEntry(key, entry);
     }
   }
 

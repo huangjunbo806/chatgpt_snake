@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import { AppError } from '../../server/errors.js';
+import { createPasswordService } from '../../server/auth/password.js';
 import { UsernameConflictError } from '../../server/repositories/errors.js';
 import { createAuthService } from '../../server/services/auth-service.js';
 
@@ -189,6 +190,60 @@ describe('Auth service', () => {
       assert.deepEqual(calls.findCredentials, []);
       assert.deepEqual(calls.verify, [{ hash: DUMMY_HASH, password: body.password }]);
     }
+  });
+
+  test('孤立 surrogate 只对 dummy hash 验证安全替代值，绝不查询真实用户 hash', async () => {
+    const rawPassword = `${'x'.repeat(14)}\uD800`;
+    const { calls, service } = createDependencies();
+
+    await assert.rejects(
+      service.login({ username: 'alice', password: rawPassword }),
+      (error) => error.code === 'INVALID_CREDENTIALS',
+    );
+
+    assert.deepEqual(calls.findCredentials, []);
+    assert.deepEqual(calls.verify, [{
+      hash: DUMMY_HASH,
+      password: 'invalid-password-input',
+    }]);
+  });
+
+  test('真实 Argon2 不允许孤立 surrogate 借替换字符 hash 登录，合法 emoji 仍可验证', async () => {
+    const passwordService = createPasswordService();
+    const replacementPassword = `${'x'.repeat(14)}\uFFFD`;
+    const loneSurrogatePassword = `${'x'.repeat(14)}\uD800`;
+    const emojiPassword = `${'x'.repeat(14)}😀`;
+    const replacementHash = await passwordService.hash(replacementPassword);
+    const emojiHash = await passwordService.hash(emojiPassword);
+    const dummyPasswordHash = await passwordService.hash('dummy password value');
+    const lookups = [];
+    const service = createAuthService({
+      userRepository: {
+        async findCredentialsByUsername(username) {
+          lookups.push(username);
+          if (username === 'alice') {
+            return { id: '1', username, passwordHash: replacementHash };
+          }
+          return { id: '2', username, passwordHash: emojiHash };
+        },
+      },
+      passwordService,
+      dummyPasswordHash,
+    });
+
+    await assert.rejects(
+      service.login({ username: 'alice', password: loneSurrogatePassword }),
+      (error) => error.code === 'INVALID_CREDENTIALS',
+    );
+    assert.deepEqual(lookups, []);
+    assert.deepEqual(
+      await service.login({ username: 'alice', password: replacementPassword }),
+      { id: '1', username: 'alice' },
+    );
+    assert.deepEqual(
+      await service.login({ username: 'emoji_user', password: emojiPassword }),
+      { id: '2', username: 'emoji_user' },
+    );
   });
 
   test('正确凭据只返回冻结 id/username，verify 或仓储异常保持 500 路径', async (t) => {

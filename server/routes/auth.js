@@ -30,6 +30,11 @@ export function createAuthRouter({
 } = {}) {
   const router = express.Router();
 
+  router.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
+
   router.post('/register', async (req, res) => {
     const limit = authThrottle.consumeRegistrationAttempt(req.ip);
     if (limit.blocked) {
@@ -37,7 +42,16 @@ export function createAuthRouter({
     }
 
     const user = await authService.register(req.body);
-    await sessionOps.establishLoginSession(req, user.id);
+    const secure = sessionCookieIsSecure(req);
+    try {
+      await sessionOps.establishLoginSession(req, user.id);
+    } catch (error) {
+      try {
+        sessionOps.clearSessionCookie(res, { secure });
+      } finally {
+        throw error;
+      }
+    }
     res.status(201).json({ data: { user } });
   });
 
@@ -60,11 +74,16 @@ export function createAuthRouter({
       throw error;
     }
 
+    const secure = sessionCookieIsSecure(req);
     try {
       await sessionOps.establishLoginSession(req, user.id);
     } catch (error) {
       authThrottle.cancelLoginAttempt(attempt.reservation);
-      throw error;
+      try {
+        sessionOps.clearSessionCookie(res, { secure });
+      } finally {
+        throw error;
+      }
     }
     authThrottle.recordLoginSuccess({ username, reservation: attempt.reservation });
     res.json({ data: { user } });

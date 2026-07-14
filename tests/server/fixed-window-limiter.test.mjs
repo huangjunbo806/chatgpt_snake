@@ -131,14 +131,42 @@ describe('固定窗口限流器', () => {
     assert.equal(limiter.consume('expired-0').blocked, false);
   });
 
+  test('容量满时新键失败关闭且不逐出活动桶，过期后增量清理释放容量', () => {
+    let currentTime = 0;
+    const limiter = createFixedWindowLimiter({
+      limit: 2,
+      windowMs: 100,
+      maxEntries: 3,
+      cleanupBudget: 1,
+      now: () => currentTime,
+    });
+
+    for (const key of ['active-a', 'active-b', 'active-c']) {
+      assert.equal(limiter.consume(key).blocked, false);
+    }
+
+    assert.deepEqual(limiter.consume('overflow'), {
+      blocked: true,
+      remaining: 0,
+      retryAfterMs: 100,
+    });
+    assert.equal(limiter.consume('active-a').blocked, false);
+    assert.equal(limiter.consume('active-a').blocked, true);
+
+    currentTime = 100;
+    assert.equal(limiter.consume('after-expiry').blocked, false);
+  });
+
   test('拒绝无效 limit/windowMs，避免永不恢复的窗口', () => {
     for (const options of [
       { limit: 0, windowMs: 1 },
       { limit: 1.5, windowMs: 1 },
       { limit: 1, windowMs: 0 },
       { limit: 1, windowMs: Number.POSITIVE_INFINITY },
+      { limit: 1, windowMs: 1, maxEntries: 0 },
+      { limit: 1, windowMs: 1, cleanupBudget: 1.5 },
     ]) {
-      assert.throws(() => createFixedWindowLimiter(options), /limit|windowMs/u);
+      assert.throws(() => createFixedWindowLimiter(options), /limit|windowMs|maxEntries|cleanupBudget/u);
     }
   });
 });

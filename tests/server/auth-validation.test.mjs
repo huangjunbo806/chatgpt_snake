@@ -85,6 +85,22 @@ describe('认证输入校验', () => {
     }
   });
 
+  test('注册拒绝未配对 UTF-16 surrogate，合法代理对仍按一个 code point 处理', () => {
+    assert.equal(parseRegistrationInput({
+      username: 'alice',
+      password: `${'x'.repeat(14)}😀`,
+    }).password, `${'x'.repeat(14)}😀`);
+
+    for (const password of [
+      `${'x'.repeat(14)}\uD800`,
+      `${'x'.repeat(14)}\uDC00`,
+      `${'x'.repeat(13)}\uD800x`,
+      `${'x'.repeat(13)}x\uDC00`,
+    ]) {
+      assertInvalidInput(() => parseRegistrationInput({ username: 'alice', password }));
+    }
+  });
+
   test('登录结构错误为 400，结构合法但凭据格式错误返回统一 invalid 结果', () => {
     for (const body of [
       null,
@@ -106,6 +122,7 @@ describe('认证输入校验', () => {
       valid: true,
       username: 'alice_1',
       password: ' 1234567890123 ',
+      verificationPassword: ' 1234567890123 ',
     });
     assert.equal(Object.isFrozen(valid), true);
 
@@ -119,5 +136,15 @@ describe('认证输入校验', () => {
       assert.equal(parsed.valid, false);
       assert.equal(Object.isFrozen(parsed), true);
     }
+  });
+
+  test('登录把孤立 surrogate 标为凭据无效，并提供固定良构替代值用于 dummy verify', () => {
+    const rawPassword = `${'x'.repeat(14)}\uD800`;
+    const parsed = parseLoginInput({ username: 'alice', password: rawPassword });
+
+    assert.equal(parsed.valid, false);
+    assert.equal(parsed.password, rawPassword);
+    assert.equal(parsed.verificationPassword, 'invalid-password-input');
+    assert.doesNotMatch(parsed.verificationPassword, /[\uD800-\uDFFF]/u);
   });
 });

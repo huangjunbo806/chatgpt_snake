@@ -7,6 +7,21 @@ import {
   createAuthThrottle,
 } from '../../server/security/auth-throttle.js';
 
+function commitFailure(throttle, input) {
+  const attempt = throttle.beginLoginAttempt(input);
+  assert.equal(attempt.blocked, false);
+  throttle.commitLoginFailure(attempt.reservation);
+  return attempt;
+}
+
+function inspectAttempt(throttle, input) {
+  const attempt = throttle.beginLoginAttempt(input);
+  if (!attempt.blocked) {
+    throttle.cancelLoginAttempt(attempt.reservation);
+  }
+  return attempt;
+}
+
 describe('认证限流器', () => {
   test('注册每 IP 每小时允许 5 次，第 6 次阻止且键隔离', () => {
     const throttle = createAuthThrottle({ now: () => 5_000 });
@@ -28,18 +43,13 @@ describe('认证限流器', () => {
     const throttle = createAuthThrottle({ now: () => 0 });
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const before = throttle.checkLoginAttempt({
-        ip: `198.51.100.${attempt}`,
-        username: '  ALICE_1 ',
-      });
-      assert.equal(before.blocked, false);
-      throttle.recordLoginFailure({
+      commitFailure(throttle, {
         ip: `198.51.100.${attempt}`,
         username: '  ALICE_1 ',
       });
     }
 
-    const blocked = throttle.checkLoginAttempt({ ip: '198.51.100.99', username: 'alice_1' });
+    const blocked = inspectAttempt(throttle, { ip: '198.51.100.99', username: 'alice_1' });
     assert.equal(blocked.blocked, true);
     assert.equal(blocked.ipBlocked, false);
     assert.equal(blocked.usernameBlocked, true);
@@ -50,11 +60,10 @@ describe('认证限流器', () => {
     const throttle = createAuthThrottle({ now: () => 0 });
 
     for (let attempt = 0; attempt < 10; attempt += 1) {
-      assert.equal(throttle.checkLoginAttempt({ ip: '192.0.2.1', username: null }).blocked, false);
-      throttle.recordLoginFailure({ ip: '192.0.2.1', username: null });
+      commitFailure(throttle, { ip: '192.0.2.1', username: null });
     }
 
-    const blocked = throttle.checkLoginAttempt({ ip: '192.0.2.1', username: null });
+    const blocked = inspectAttempt(throttle, { ip: '192.0.2.1', username: null });
     assert.equal(blocked.blocked, true);
     assert.equal(blocked.ipBlocked, true);
     assert.equal(blocked.usernameBlocked, false);
@@ -77,7 +86,7 @@ describe('认证限流器', () => {
     throttle.commitLoginFailure(replacement.reservation);
     throttle.cancelLoginAttempt(replacement.reservation);
 
-    assert.equal(throttle.checkLoginAttempt({ ip: '192.0.2.1', username: 'alice' }).blocked, true);
+    assert.equal(inspectAttempt(throttle, { ip: '192.0.2.1', username: 'alice' }).blocked, true);
   });
 
   test('混合并发中成功只清旧失败并保留其他 pending，后续失败仍从零累计到阈值', () => {
@@ -109,25 +118,25 @@ describe('认证限流器', () => {
     const throttle = createAuthThrottle({ now: () => 0 });
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      throttle.recordLoginFailure({ ip: `203.0.113.${attempt}`, username: 'bad-name' });
+      commitFailure(throttle, { ip: `203.0.113.${attempt}`, username: 'bad-name' });
     }
-    assert.equal(throttle.checkLoginAttempt({ ip: '203.0.113.50', username: 'bad-name' }).blocked, false);
+    assert.equal(inspectAttempt(throttle, { ip: '203.0.113.50', username: 'bad-name' }).blocked, false);
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      throttle.recordLoginFailure({ ip: '192.0.2.10', username: 'alice' });
+      commitFailure(throttle, { ip: '192.0.2.10', username: 'alice' });
     }
-    assert.equal(throttle.checkLoginAttempt({ ip: '192.0.2.10', username: 'alice' }).usernameBlocked, true);
+    assert.equal(inspectAttempt(throttle, { ip: '192.0.2.10', username: 'alice' }).usernameBlocked, true);
 
     throttle.recordLoginSuccess({ username: ' ALICE ' });
-    const afterSuccess = throttle.checkLoginAttempt({ ip: '192.0.2.10', username: 'alice' });
+    const afterSuccess = inspectAttempt(throttle, { ip: '192.0.2.10', username: 'alice' });
     assert.equal(afterSuccess.blocked, false);
     assert.equal(afterSuccess.usernameBlocked, false);
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      throttle.recordLoginFailure({ ip: '192.0.2.10', username: `other_${attempt}` });
+      commitFailure(throttle, { ip: '192.0.2.10', username: `other_${attempt}` });
     }
     throttle.recordLoginSuccess({ username: 'other_0' });
-    const ipStillBlocked = throttle.checkLoginAttempt({ ip: '192.0.2.10', username: 'fresh_user' });
+    const ipStillBlocked = inspectAttempt(throttle, { ip: '192.0.2.10', username: 'fresh_user' });
     assert.equal(ipStillBlocked.ipBlocked, true);
     assert.equal(ipStillBlocked.blocked, true);
   });
@@ -137,27 +146,37 @@ describe('认证限流器', () => {
     const throttle = createAuthThrottle({ now: () => currentTime });
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      throttle.recordLoginFailure({ ip: `198.51.100.${attempt}`, username: 'alice' });
+      commitFailure(throttle, { ip: `198.51.100.${attempt}`, username: 'alice' });
     }
 
     currentTime = 100;
     for (let attempt = 0; attempt < 10; attempt += 1) {
-      throttle.recordLoginFailure({ ip: '192.0.2.5', username: null });
+      commitFailure(throttle, { ip: '192.0.2.5', username: null });
     }
 
     currentTime = 200;
-    const blocked = throttle.checkLoginAttempt({ ip: '192.0.2.5', username: 'alice' });
+    const blocked = inspectAttempt(throttle, { ip: '192.0.2.5', username: 'alice' });
     assert.equal(blocked.ipBlocked, true);
     assert.equal(blocked.usernameBlocked, true);
     assert.equal(blocked.retryAfterMs, LOGIN_WINDOW_MS - 100);
 
     currentTime = LOGIN_WINDOW_MS;
-    const oneExpired = throttle.checkLoginAttempt({ ip: '192.0.2.5', username: 'alice' });
+    const oneExpired = inspectAttempt(throttle, { ip: '192.0.2.5', username: 'alice' });
     assert.equal(oneExpired.usernameBlocked, false);
     assert.equal(oneExpired.ipBlocked, true);
     assert.equal(oneExpired.retryAfterMs, 100);
 
     currentTime = LOGIN_WINDOW_MS + 100;
-    assert.equal(throttle.checkLoginAttempt({ ip: '192.0.2.5', username: 'alice' }).blocked, false);
+    assert.equal(inspectAttempt(throttle, { ip: '192.0.2.5', username: 'alice' }).blocked, false);
+  });
+
+  test('只公开原子预留式登录 API，不暴露 check 与 record 的竞态组合', () => {
+    assert.deepEqual(Object.keys(createAuthThrottle()), [
+      'consumeRegistrationAttempt',
+      'beginLoginAttempt',
+      'commitLoginFailure',
+      'cancelLoginAttempt',
+      'recordLoginSuccess',
+    ]);
   });
 });

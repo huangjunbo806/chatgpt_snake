@@ -162,6 +162,63 @@ describe('Session 配置与 Promise helpers', () => {
     }
   });
 
+  test('建立登录 Session 保存失败时保留首错，即使清理失败也销毁新 SID 并清请求状态', async () => {
+    const firstError = new Error('first-save-error');
+    const cleanupError = new Error('cleanup-error');
+    const destroyed = [];
+    const req = {
+      sessionID: 'old-session-id',
+      sessionStore: {
+        destroy(sessionId, callback) {
+          destroyed.push(sessionId);
+          callback(cleanupError);
+        },
+      },
+      session: {
+        regenerate(callback) {
+          req.sessionID = 'new-session-id';
+          req.session = {
+            save(saveCallback) {
+              saveCallback(firstError);
+            },
+          };
+          callback();
+        },
+      },
+    };
+
+    await assert.rejects(establishLoginSession(req, '42'), (error) => error === firstError);
+    assert.deepEqual(destroyed, ['new-session-id']);
+    assert.equal('session' in req, false);
+    assert.equal('sessionID' in req, false);
+  });
+
+  test('regenerate 报错但已换 SID 时保留首错，并 best-effort 销毁旧、新 SID', async () => {
+    const firstError = new Error('regenerate-error');
+    const destroyed = [];
+    const req = {
+      sessionID: 'old-session-id',
+      sessionStore: {
+        destroy(sessionId, callback) {
+          destroyed.push(sessionId);
+          callback(new Error(`cleanup-error:${sessionId}`));
+        },
+      },
+      session: {
+        regenerate(callback) {
+          req.sessionID = 'new-session-id';
+          req.session = { save() {} };
+          callback(firstError);
+        },
+      },
+    };
+
+    await assert.rejects(establishLoginSession(req, '42'), (error) => error === firstError);
+    assert.deepEqual(destroyed, ['old-session-id', 'new-session-id']);
+    assert.equal('session' in req, false);
+    assert.equal('sessionID' in req, false);
+  });
+
   test('清 Cookie 复用名称和属性，不向 clearCookie 传 maxAge/Expires', () => {
     const calls = [];
     clearSessionCookie({

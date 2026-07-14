@@ -62,14 +62,6 @@ export function createAuthThrottle({ now = Date.now } = {}) {
     return registrationIp.consume(ipKey(ip));
   }
 
-  function checkLoginAttempt({ ip, username } = {}) {
-    const normalizedUsernameKey = usernameKey(username);
-    return loginResult(
-      loginIp.check(ipKey(ip)),
-      normalizedUsernameKey === null ? null : loginUsername.check(normalizedUsernameKey),
-    );
-  }
-
   function beginLoginAttempt({ ip, username } = {}) {
     const normalizedUsernameKey = usernameKey(username);
     const ipReserved = loginIp.reserve(ipKey(ip));
@@ -128,16 +120,6 @@ export function createAuthThrottle({ now = Date.now } = {}) {
     }
   }
 
-  function recordLoginFailure({ ip, username } = {}) {
-    const normalizedUsernameKey = usernameKey(username);
-    return loginResult(
-      loginIp.recordFailure(ipKey(ip)),
-      normalizedUsernameKey === null
-        ? null
-        : loginUsername.recordFailure(normalizedUsernameKey),
-    );
-  }
-
   function recordLoginSuccess({ username, reservation } = {}) {
     const reserved = takeLoginReservation(reservation);
     if (reserved) {
@@ -155,11 +137,9 @@ export function createAuthThrottle({ now = Date.now } = {}) {
 
   return Object.freeze({
     consumeRegistrationAttempt,
-    checkLoginAttempt,
     beginLoginAttempt,
     commitLoginFailure,
     cancelLoginAttempt,
-    recordLoginFailure,
     recordLoginSuccess,
   });
 }
