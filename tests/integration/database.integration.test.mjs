@@ -10,6 +10,7 @@ import {
 import { loadMigrations, runMigrations } from '../../server/database/migrations.js';
 import { createPostgresSessionStore } from '../../server/database/session-store.js';
 import { UsernameConflictError } from '../../server/repositories/errors.js';
+import { createLeaderboardRepository } from '../../server/repositories/leaderboard-repository.js';
 import { createUserRepository } from '../../server/repositories/user-repository.js';
 import {
   assertSafeTestDatabaseUrl,
@@ -334,6 +335,225 @@ if (databaseUrl === null) {
         [['Invalid-Username', 'invalid_score']],
       );
       assert.deepEqual(rejectedRows.rows, []);
+    });
+
+    test('并发提交 100、200、50 时原子提分最终保留 200', async () => {
+      await runMigrations({ pool, logger: silentLogger });
+      const userRepository = createUserRepository({ pool });
+      const leaderboardRepository = createLeaderboardRepository({ pool });
+      const user = await userRepository.create({
+        username: 'concurrent_score',
+        passwordHash: 'integration-password-hash',
+      });
+
+      const outcomes = await Promise.all([
+        leaderboardRepository.raiseBestScore({ userId: user.id, score: 100 }),
+        leaderboardRepository.raiseBestScore({ userId: user.id, score: 200 }),
+        leaderboardRepository.raiseBestScore({ userId: user.id, score: 50 }),
+      ]);
+
+      assert.equal(outcomes.every((outcome) => typeof outcome === 'boolean'), true);
+      assert.equal(outcomes.includes(true), true);
+      const result = await pool.query(
+        `
+          SELECT best_score, best_score_at
+          FROM public.users
+          WHERE id = $1
+        `,
+        [user.id],
+      );
+      assert.equal(result.rows[0].best_score, 200);
+      assert.equal(result.rows[0].best_score_at instanceof Date, true);
+    });
+
+    test('同分与低分均不改变首次达到当前最高分的时间', async () => {
+      await runMigrations({ pool, logger: silentLogger });
+      const originalBestScoreAt = '2026-01-02T03:04:05.678Z';
+      const inserted = await pool.query(
+        `
+          INSERT INTO public.users (
+            username,
+            password_hash,
+            best_score,
+            best_score_at
+          )
+          VALUES ($1, $2, $3, $4)
+          RETURNING id
+        `,
+        [
+          'unchanged_time',
+          'integration-password-hash',
+          200,
+          originalBestScoreAt,
+        ],
+      );
+      const userId = String(inserted.rows[0].id);
+      const repository = createLeaderboardRepository({ pool });
+
+      assert.equal(
+        await repository.raiseBestScore({ userId, score: 200 }),
+        false,
+      );
+      assert.equal(
+        await repository.raiseBestScore({ userId, score: 100 }),
+        false,
+      );
+
+      const result = await pool.query(
+        `
+          SELECT best_score, best_score_at
+          FROM public.users
+          WHERE id = $1
+        `,
+        [userId],
+      );
+      assert.equal(result.rows[0].best_score, 200);
+      assert.equal(result.rows[0].best_score_at.toISOString(), originalBestScoreAt);
+    });
+
+    test('0 分用户不进入 top 但仍返回 rank 为 null 的个人 standing', async () => {
+      await runMigrations({ pool, logger: silentLogger });
+      const userRepository = createUserRepository({ pool });
+      const repository = createLeaderboardRepository({ pool });
+      const zeroScoreUser = await userRepository.create({
+        username: 'zero_score_user',
+        passwordHash: 'integration-password-hash',
+      });
+      await pool.query(
+        `
+          INSERT INTO public.users (
+            username,
+            password_hash,
+            best_score,
+            best_score_at
+          )
+          VALUES ($1, $2, $3, $4)
+        `,
+        [
+          'positive_score_user',
+          'integration-password-hash',
+          100,
+          '2026-02-03T04:05:06.000Z',
+        ],
+      );
+
+      const top = await repository.findTop();
+
+      assert.deepEqual(top, [{
+        rank: 1,
+        username: 'positive_score_user',
+        bestScore: 100,
+        bestScoreAt: '2026-02-03T04:05:06.000Z',
+      }]);
+      assert.deepEqual(
+        await repository.findUserStandingById(zeroScoreUser.id),
+        {
+          rank: null,
+          username: 'zero_score_user',
+          bestScore: 0,
+          bestScoreAt: null,
+        },
+      );
+    });
+
+    test('同分先按达到时间升序、再按用户 id 升序排列', async () => {
+      await runMigrations({ pool, logger: silentLogger });
+      await pool.query(
+        `
+          INSERT INTO public.users (
+            username,
+            password_hash,
+            best_score,
+            best_score_at
+          )
+          VALUES
+            ($1, $2, 300, $3),
+            ($4, $2, 300, $5),
+            ($6, $2, 300, $5)
+        `,
+        [
+          'later_reached',
+          'integration-password-hash',
+          '2026-03-04T05:06:08.000Z',
+          'early_lower_id',
+          '2026-03-04T05:06:07.000Z',
+          'early_higher_id',
+        ],
+      );
+      const repository = createLeaderboardRepository({ pool });
+
+      const top = await repository.findTop({ limit: 3 });
+
+      assert.deepEqual(
+        top.map(({ rank, username }) => ({ rank, username })),
+        [
+          { rank: 1, username: 'early_lower_id' },
+          { rank: 2, username: 'early_higher_id' },
+          { rank: 3, username: 'later_reached' },
+        ],
+      );
+    });
+
+    test('105 名正分用户只返回 top 100 且第 105 名仍可查询 standing', async () => {
+      await runMigrations({ pool, logger: silentLogger });
+      const bestScoreAt = '2026-04-05T06:07:08.000Z';
+      await pool.query(
+        `
+          INSERT INTO public.users (
+            username,
+            password_hash,
+            best_score,
+            best_score_at
+          )
+          SELECT
+            'rank_' || lpad(ordinal::text, 3, '0'),
+            'integration-password-hash-' || ordinal::text,
+            100,
+            $1::timestamptz
+          FROM generate_series(1, 105) AS generated(ordinal)
+          ORDER BY ordinal
+        `,
+        [bestScoreAt],
+      );
+      const orderedUsersResult = await pool.query(`
+        SELECT id::text AS id, username
+        FROM public.users
+        ORDER BY id
+      `);
+      const repository = createLeaderboardRepository({ pool });
+
+      const top = await repository.findTop();
+
+      assert.equal(top.length, 100);
+      assert.deepEqual(
+        top.map(({ rank }) => rank),
+        Array.from({ length: 100 }, (_, index) => index + 1),
+      );
+      assert.deepEqual(
+        top.map(({ username }) => username),
+        orderedUsersResult.rows.slice(0, 100).map(({ username }) => username),
+      );
+
+      const lastUser = orderedUsersResult.rows[104];
+      assert.deepEqual(
+        await repository.findUserStandingById(lastUser.id),
+        {
+          rank: 105,
+          username: lastUser.username,
+          bestScore: 100,
+          bestScoreAt,
+        },
+      );
+    });
+
+    test('findUserStandingById 对不存在的用户返回 null', async () => {
+      await runMigrations({ pool, logger: silentLogger });
+      const repository = createLeaderboardRepository({ pool });
+
+      assert.equal(
+        await repository.findUserStandingById('9223372036854775807'),
+        null,
+      );
     });
 
     test('迁移幂等、schema 与仓储可用且 Session Store 可读写销毁', async () => {

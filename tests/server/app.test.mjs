@@ -268,6 +268,7 @@ describe('同源 JSON 写请求保护', () => {
 
       assert.equal(response.status, 415);
       assert.equal(response.body.error.code, 'JSON_CONTENT_TYPE_REQUIRED');
+      assert.equal(response.headers['cache-control'], 'no-store');
     });
 
     await t.test('自定义头必须精确为 1', async () => {
@@ -280,6 +281,7 @@ describe('同源 JSON 写请求保护', () => {
 
       assert.equal(response.status, 403);
       assert.equal(response.body.error.code, 'WRITE_HEADER_REQUIRED');
+      assert.equal(response.headers['cache-control'], 'no-store');
     });
 
     await t.test('Origin 必须与配置精确相同', async () => {
@@ -292,6 +294,7 @@ describe('同源 JSON 写请求保护', () => {
 
       assert.equal(response.status, 403);
       assert.equal(response.body.error.code, 'ORIGIN_NOT_ALLOWED');
+      assert.equal(response.headers['cache-control'], 'no-store');
     });
 
     assert.equal(state.writeCount, undefined);
@@ -328,6 +331,23 @@ describe('同源 JSON 写请求保护', () => {
 });
 
 describe('JSON 请求体与统一错误处理', () => {
+  test('非分数 API 保持原有 strict JSON parser 行为', async () => {
+    const response = await protectedPost(buildApp({
+      requestIdFactory: () => 'strict-json',
+      routers: [{ path: '/api/test', router: testRouter() }],
+    }), '/api/test/write').send('"valid-json-scalar"');
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(response.body, {
+      error: {
+        code: 'INVALID_JSON',
+        message: '请求体必须是有效的 JSON',
+        requestId: 'strict-json',
+      },
+    });
+    assert.equal(response.headers['cache-control'], 'no-store');
+  });
+
   test('解析合法 JSON 并拒绝非法 JSON', async () => {
     const app = buildApp({
       requestIdFactory: sequenceRequestIds('json'),
@@ -346,6 +366,7 @@ describe('JSON 请求体与统一错误处理', () => {
         requestId: 'json-2',
       },
     });
+    assert.equal(invalid.headers['cache-control'], 'no-store');
   });
 
   test('接受恰好 16 KiB 的 JSON，超出一个字节返回 413', async () => {
@@ -547,6 +568,7 @@ describe('JSON 请求体与统一错误处理', () => {
 
     assert.equal(response.status, 500);
     assert.equal(response.body.error.code, 'INTERNAL_ERROR');
+    assert.equal(response.headers['cache-control'], 'no-store');
     assert.equal(state.readCount, undefined);
     assert.doesNotMatch(response.text, /sid-secret|connect\.sid|secret-hash/u);
     assert.doesNotMatch(inspect(logger.entries), /sid-secret|connect\.sid|secret-hash/u);

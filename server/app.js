@@ -62,7 +62,12 @@ export function createApp({
     }
   });
 
+  app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
   app.use('/api', createSameOriginWrite({ publicOrigin: config.publicOrigin }));
+  app.use('/api/scores', express.json({ limit: 16 * 1024, strict: false }));
   app.use(express.json({ limit: 16 * 1024 }));
   app.use(sessionMiddleware);
 
