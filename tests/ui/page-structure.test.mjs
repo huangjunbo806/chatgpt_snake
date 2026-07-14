@@ -128,3 +128,16 @@ test('排行榜使用有序列表并保留状态与个人排名', async () => {
   );
   assert.match(html, /\bid=["']my-rank["']/i);
 });
+
+test('游戏画布提供无障碍说明并通过 ES 模块加载静态预览', async () => {
+  const html = await readPage();
+
+  assert.match(
+    html,
+    /<canvas\b(?=[^>]*\bid=["']game-canvas["'])(?=[^>]*\brole=["']img["'])(?=[^>]*\baria-label=["']Docker Snake 游戏棋盘["'])(?=[^>]*\baria-describedby=["']game-status["'])[^>]*>/i,
+  );
+  assert.match(
+    html,
+    /<script\b(?=[^>]*\btype=["']module["'])(?=[^>]*\bsrc=["']\.\/scripts\/main\.js["'])[^>]*><\/script>/i,
+  );
+});

@@ -9,7 +9,7 @@
     >
     <title>Docker Snake | CSS 第二课</title>
     <link rel="stylesheet" href="./styles/main.css">
-    <script src="./scripts/main.js" defer></script>
+    <script type="module" src="./scripts/main.js"></script>
   </head>
   <body>
     <div id="app" class="page-shell">
@@ -63,7 +63,14 @@
           </dl>
 
           <div class="canvas-frame">
-            <canvas id="game-canvas" width="600" height="600">
+            <canvas
+              id="game-canvas"
+              width="600"
+              height="600"
+              role="img"
+              aria-label="Docker Snake 游戏棋盘"
+              aria-describedby="game-status"
+            >
               您的浏览器不支持 Canvas，请升级浏览器后再试。
             </canvas>
           </div>
