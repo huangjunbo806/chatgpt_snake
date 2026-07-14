@@ -5,95 +5,158 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta
       name="description"
-      content="Docker Snake 全栈学习项目的语义化游戏页面骨架"
+      content="Docker Snake 全栈学习项目的终端霓虹响应式游戏界面"
     >
-    <title>Docker Snake | HTML 第一课</title>
+    <title>Docker Snake | CSS 第二课</title>
     <link rel="stylesheet" href="./styles/main.css">
     <script src="./scripts/main.js" defer></script>
   </head>
   <body>
-    <header>
-      <div>
-        <p aria-label="当前课程">$ docker-snake --lesson html</p>
-        <h1>Docker Snake</h1>
-        <p>用语义化 HTML 搭建终端游戏控制台</p>
-      </div>
-
-      <div>
-        <p id="session-status">当前状态：访客</p>
-        <nav id="auth-controls" aria-label="账户操作">
-          <button type="button">注册</button>
-          <button type="button">登录</button>
-        </nav>
-      </div>
-    </header>
-
-    <main>
-      <section aria-labelledby="game-data-heading">
-        <h2 id="game-data-heading">游戏数据</h2>
-        <dl>
-          <div>
-            <dt>当前分数</dt>
-            <dd id="current-score">0</dd>
-          </div>
-          <div>
-            <dt>个人最高分</dt>
-            <dd id="best-score">0</dd>
-          </div>
-          <div>
-            <dt>速度等级</dt>
-            <dd id="speed-level">1</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section aria-labelledby="game-area-heading">
-        <h2 id="game-area-heading">游戏区域</h2>
-        <p id="game-status" aria-live="polite">游戏尚未开始。</p>
-
-        <canvas id="game-canvas" width="600" height="600">
-          您的浏览器不支持 Canvas，请升级浏览器后再试。
-        </canvas>
-
-        <div aria-label="游戏操作">
-          <button id="start-game" type="button">开始游戏</button>
-          <button id="toggle-pause" type="button">暂停 / 继续</button>
-          <button id="restart-game" type="button">重新开始</button>
-          <button id="retry-score" type="button">重试提交成绩</button>
+    <div id="app" class="page-shell">
+      <header class="topbar">
+        <div class="brand">
+          <p class="eyebrow">HTML + CSS 学习项目</p>
+          <h1>Docker Snake</h1>
+          <p class="command-line" aria-label="当前课程命令">
+            <span aria-hidden="true">$</span> docker-snake --lesson css
+          </p>
         </div>
 
-        <section aria-labelledby="instructions-heading">
-          <h3 id="instructions-heading">操作说明</h3>
-          <ul>
-            <li>使用方向键或 WASD 控制蛇的方向。</li>
-            <li>使用空格键暂停或继续游戏。</li>
-          </ul>
+        <div class="session-panel">
+          <p id="session-status">
+            <span class="online-indicator" aria-hidden="true"></span>
+            当前状态：访客
+          </p>
+          <nav id="auth-controls" aria-label="账户操作">
+            <button type="button">注册</button>
+            <button type="button">登录</button>
+          </nav>
+        </div>
+      </header>
+
+      <main>
+        <section class="game-console" aria-labelledby="game-area-heading">
+          <header class="console-header">
+            <div>
+              <p class="eyebrow">Game Console</p>
+              <h2 id="game-area-heading">游戏控制台</h2>
+            </div>
+            <p id="game-status" class="game-status" aria-live="polite">
+              游戏尚未开始
+            </p>
+          </header>
+
+          <h3 id="game-data-heading" class="section-label">游戏数据</h3>
+          <dl class="metrics" aria-labelledby="game-data-heading">
+            <div class="metric">
+              <dt>当前分数</dt>
+              <dd id="current-score">0</dd>
+            </div>
+            <div class="metric">
+              <dt>个人最高分</dt>
+              <dd id="best-score">0</dd>
+            </div>
+            <div class="metric">
+              <dt>速度等级</dt>
+              <dd id="speed-level">1</dd>
+            </div>
+          </dl>
+
+          <div class="canvas-frame">
+            <canvas id="game-canvas" width="600" height="600">
+              您的浏览器不支持 Canvas，请升级浏览器后再试。
+            </canvas>
+          </div>
+
+          <div class="game-actions" aria-label="游戏操作">
+            <button id="start-game" type="button">开始游戏</button>
+            <button id="toggle-pause" type="button" disabled>
+              暂停 / 继续
+            </button>
+            <button id="restart-game" type="button" disabled>重新开始</button>
+            <button id="retry-score" type="button" disabled>
+              重试提交成绩
+            </button>
+          </div>
+
+          <section class="instructions" aria-labelledby="instructions-heading">
+            <h3 id="instructions-heading">操作说明</h3>
+            <ul>
+              <li>使用方向键或 WASD 控制蛇的方向。</li>
+              <li>使用空格键暂停或继续游戏。</li>
+            </ul>
+          </section>
+
+          <div
+            id="touch-controls"
+            class="touch-controls"
+            aria-label="触控方向操作"
+          >
+            <button
+              class="touch-button touch-up"
+              type="button"
+              data-direction="up"
+              aria-label="向上"
+            >
+              ↑
+            </button>
+            <button
+              class="touch-button touch-left"
+              type="button"
+              data-direction="left"
+              aria-label="向左"
+            >
+              ←
+            </button>
+            <button
+              class="touch-button touch-down"
+              type="button"
+              data-direction="down"
+              aria-label="向下"
+            >
+              ↓
+            </button>
+            <button
+              class="touch-button touch-right"
+              type="button"
+              data-direction="right"
+              aria-label="向右"
+            >
+              →
+            </button>
+          </div>
         </section>
 
-        <div id="touch-controls" aria-label="触控方向操作">
-          <button type="button" data-direction="up" aria-label="向上">↑</button>
-          <button type="button" data-direction="left" aria-label="向左">←</button>
-          <button type="button" data-direction="down" aria-label="向下">↓</button>
-          <button type="button" data-direction="right" aria-label="向右">→</button>
-        </div>
-      </section>
+        <section
+          id="leaderboard-section"
+          class="leaderboard"
+          aria-labelledby="leaderboard-heading"
+        >
+          <header class="console-header">
+            <div>
+              <p class="eyebrow">Casual Ranking</p>
+              <h2 id="leaderboard-heading">休闲排行榜</h2>
+            </div>
+            <p id="leaderboard-status" aria-live="polite">
+              排行榜将在后续课程接入
+            </p>
+          </header>
+          <ol id="leaderboard-list">
+            <li>暂无已提交成绩</li>
+          </ol>
+          <p id="my-rank">我的排名：访客不参与排行榜</p>
+        </section>
+      </main>
 
-      <section id="leaderboard-section" aria-labelledby="leaderboard-heading">
-        <h2 id="leaderboard-heading">休闲排行榜</h2>
-        <p id="leaderboard-status" aria-live="polite">
-          排行榜将在后续课程接入。
-        </p>
-        <ol id="leaderboard-list">
-          <li>暂无已提交成绩</li>
-        </ol>
-        <p id="my-rank">我的排名：访客不参与排行榜</p>
-      </section>
-    </main>
+      <footer class="site-footer">
+        <p>Docker Snake · CSS 第二课：终端霓虹响应式界面</p>
+      </footer>
+    </div>
 
-    <footer>
-      <p>Docker Snake · HTML 第一课：页面骨架</p>
-    </footer>
-
-    <noscript>此页面需要启用 JavaScript 才能在后续课程中运行游戏。</noscript>
+    <noscript>
+      <p class="noscript-message">
+        此页面需要启用 JavaScript 才能在后续课程中运行游戏。
+      </p>
+    </noscript>
   </body>
 </html>
