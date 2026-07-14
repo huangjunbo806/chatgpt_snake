@@ -80,6 +80,31 @@ describe('认证限流器', () => {
     assert.equal(throttle.checkLoginAttempt({ ip: '192.0.2.1', username: 'alice' }).blocked, true);
   });
 
+  test('混合并发中成功只清旧失败并保留其他 pending，后续失败仍从零累计到阈值', () => {
+    const throttle = createAuthThrottle({ now: () => 0 });
+    const attempts = [];
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const started = throttle.beginLoginAttempt({ ip: '192.0.2.20', username: 'alice' });
+      assert.equal(started.blocked, false);
+      attempts.push(started.reservation);
+    }
+
+    throttle.recordLoginSuccess({ username: 'alice', reservation: attempts[0] });
+    for (const reservation of attempts.slice(1)) {
+      throttle.commitLoginFailure(reservation);
+    }
+
+    const fifthFailure = throttle.beginLoginAttempt({ ip: '192.0.2.20', username: 'alice' });
+    assert.equal(fifthFailure.blocked, false);
+    throttle.commitLoginFailure(fifthFailure.reservation);
+
+    const sixthAttempt = throttle.beginLoginAttempt({ ip: '192.0.2.20', username: 'alice' });
+    assert.equal(sixthAttempt.blocked, true);
+    assert.equal(sixthAttempt.ipBlocked, false);
+    assert.equal(sixthAttempt.usernameBlocked, true);
+  });
+
   test('非法用户名不创建用户名键，成功只清用户名计数而保留 IP 失败', () => {
     const throttle = createAuthThrottle({ now: () => 0 });
 

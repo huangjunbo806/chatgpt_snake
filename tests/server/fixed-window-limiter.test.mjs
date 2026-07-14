@@ -73,6 +73,47 @@ describe('固定窗口限流器', () => {
     });
   });
 
+  test('clearCommitted 只清已提交失败，保留 pending 且其后 commit 重新累计', () => {
+    const limiter = createFixedWindowLimiter({ limit: 5, windowMs: 500, now: () => 10 });
+
+    limiter.consume('a');
+    limiter.consume('a');
+    const pending = limiter.reserve('a');
+    limiter.clearCommitted('a');
+
+    assert.deepEqual(limiter.check('a'), {
+      blocked: false,
+      remaining: 4,
+      retryAfterMs: 0,
+    });
+    limiter.commit(pending.reservation);
+    assert.deepEqual(limiter.check('a'), {
+      blocked: false,
+      remaining: 4,
+      retryAfterMs: 0,
+    });
+  });
+
+  test('过期 reservation 的 commit/release 不影响新窗口 entry', () => {
+    let currentTime = 0;
+    const limiter = createFixedWindowLimiter({ limit: 3, windowMs: 100, now: () => currentTime });
+    const expiredCommit = limiter.reserve('a');
+    const expiredRelease = limiter.reserve('a');
+
+    currentTime = 100;
+    const current = limiter.reserve('a');
+    limiter.commit(expiredCommit.reservation);
+    limiter.release(expiredRelease.reservation);
+
+    assert.deepEqual(limiter.check('a'), {
+      blocked: false,
+      remaining: 2,
+      retryAfterMs: 0,
+    });
+    limiter.commit(current.reservation);
+    assert.equal(limiter.check('a').remaining, 2);
+  });
+
   test('到达窗口边界恢复，并在普通操作中机会式清理过期键', () => {
     let currentTime = 0;
     const limiter = createFixedWindowLimiter({ limit: 1, windowMs: 100, now: () => currentTime });

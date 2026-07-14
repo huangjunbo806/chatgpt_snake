@@ -142,11 +142,14 @@ export function createAuthThrottle({ now = Date.now } = {}) {
     const reserved = takeLoginReservation(reservation);
     if (reserved) {
       loginIp.release(reserved.ip);
+      if (reserved.username !== null) {
+        loginUsername.release(reserved.username);
+      }
     }
 
     const normalizedUsernameKey = usernameKey(username) ?? reserved?.usernameKey ?? null;
     if (normalizedUsernameKey !== null) {
-      loginUsername.reset(normalizedUsernameKey);
+      loginUsername.clearCommitted(normalizedUsernameKey);
     }
   }
 
