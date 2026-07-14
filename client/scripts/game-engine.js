@@ -70,7 +70,7 @@ function intervalForLevel(level) {
 function endedState(state) {
   return {
     ...state,
-    status: 'gameover',
+    status: 'game-over',
     turnAccepted: false,
   };
 }

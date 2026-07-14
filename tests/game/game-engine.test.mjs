@@ -158,7 +158,7 @@ describe('开始、暂停、恢复和重开', () => {
     const states = [
       createInitialState(() => 0),
       pauseGame(running),
-      { ...running, status: 'gameover' },
+      { ...running, status: 'game-over' },
       { ...running, status: 'won', food: null },
     ];
 
@@ -274,7 +274,7 @@ describe('碰撞规则', () => {
     const before = clone(state);
     const result = stepGame(state, () => 0);
 
-    assert.equal(result.status, 'gameover');
+    assert.equal(result.status, 'game-over');
     assert.deepEqual(result.snake, state.snake);
     assert.equal(result.snake.some((cell) => cell.x === 20), false);
     assert.deepEqual(state, before);
@@ -295,7 +295,7 @@ describe('碰撞规则', () => {
     });
     const result = stepGame(state, () => 0);
 
-    assert.equal(result.status, 'gameover');
+    assert.equal(result.status, 'game-over');
     assert.deepEqual(result.snake, state.snake);
   });
 
