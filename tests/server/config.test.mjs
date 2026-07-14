@@ -101,6 +101,9 @@ describe('loadConfig 拒绝非法配置', () => {
     const cases = [
       'ftp://example.test',
       'https://example.test/path',
+      'https://example.test/a/..',
+      'https://example.test/%2e',
+      'https://example.test\\path\\..',
       'https://example.test?debug=1',
       'https://example.test#debug',
       'https://user:password@example.test',

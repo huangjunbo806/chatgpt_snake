@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 const PROJECT_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const NODE_ENVIRONMENTS = new Set(['development', 'test', 'production']);
+const PURE_HTTP_ORIGIN_PATTERN = /^https?:\/\/[^/?#\\\s]+\/?$/iu;
 
 function parseInteger(value, { name, defaultValue, min, max }) {
   const rawValue = value ?? String(defaultValue);
@@ -37,6 +38,10 @@ function validateDatabaseUrl(value) {
 function parsePublicOrigin(value, nodeEnv) {
   const rawOrigin = typeof value === 'string' ? value.trim() : '';
   let publicUrl;
+
+  if (!PURE_HTTP_ORIGIN_PATTERN.test(rawOrigin)) {
+    throw new Error('PUBLIC_ORIGIN 必须是仅包含 origin 的 http 或 https URL');
+  }
 
   try {
     publicUrl = new URL(rawOrigin);
