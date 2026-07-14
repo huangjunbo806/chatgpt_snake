@@ -66,6 +66,9 @@ function testRouter(state = {}) {
   router.get('/unknown-error', () => {
     throw new Error('SQL password=internal-db-password at /srv/private/file.js');
   });
+  router.get('/leak/:secret', () => {
+    throw new Error('内部动态路径处理失败');
+  });
   router.get('/async-error', async () => {
     await Promise.resolve();
     throw new Error('postgresql://user:async-db-password@db.example.test/snake');
@@ -101,6 +104,22 @@ function protectedPost(app, pathname) {
 function jsonDocumentWithBytes(size) {
   const framing = Buffer.byteLength('{"value":""}', 'utf8');
   return `{"value":"${'x'.repeat(size - framing)}"}`;
+}
+
+function createBodyParserReadError(type) {
+  const expected = 128;
+  const received = type === 'request.aborted' ? 64 : 127;
+
+  return Object.assign(new Error(type), {
+    status: 400,
+    statusCode: 400,
+    expose: true,
+    expected,
+    length: expected,
+    received,
+    type,
+    ...(type === 'request.aborted' ? { code: 'ECONNABORTED' } : {}),
+  });
 }
 
 describe('createApp 基础 HTTP 行为', () => {
@@ -389,6 +408,54 @@ describe('JSON 请求体与统一错误处理', () => {
     }
   });
 
+  test('body-parser 读取中止与长度不符稳定返回 400 且不记录 5xx', async (t) => {
+    const logger = createLogger();
+    const router = express.Router();
+    const cases = [
+      {
+        type: 'request.aborted',
+        path: '/aborted',
+        code: 'REQUEST_ABORTED',
+        message: '请求体传输未完成',
+      },
+      {
+        type: 'request.size.invalid',
+        path: '/size-invalid',
+        code: 'REQUEST_SIZE_INVALID',
+        message: '请求体长度与声明不一致',
+      },
+    ];
+
+    for (const testCase of cases) {
+      router.get(testCase.path, (req, res, next) => {
+        next(createBodyParserReadError(testCase.type));
+      });
+    }
+
+    const app = buildApp({
+      logger,
+      requestIdFactory: sequenceRequestIds('body-read'),
+      routers: [{ path: '/api/body-parser', router }],
+    });
+
+    for (const [index, testCase] of cases.entries()) {
+      await t.test(testCase.type, async () => {
+        const response = await request(app).get(`/api/body-parser${testCase.path}`);
+
+        assert.equal(response.status, 400);
+        assert.deepEqual(response.body, {
+          error: {
+            code: testCase.code,
+            message: testCase.message,
+            requestId: `body-read-${index + 1}`,
+          },
+        });
+      });
+    }
+
+    assert.deepEqual(logger.entries, []);
+  });
+
   test('AppError 保留公开状态、稳定码与中文消息', async () => {
     const response = await request(buildApp({
       requestIdFactory: () => 'known-error',
@@ -418,13 +485,13 @@ describe('JSON 请求体与统一错误处理', () => {
     assert.equal(pageResponse.body.error.requestId, 'missing-2');
   });
 
-  test('未知错误返回 500，日志只记录脱敏的必要上下文', async () => {
+  test('未知错误返回 500，日志不记录查询或动态路径参数', async () => {
     const logger = createLogger();
     const response = await request(buildApp({
       logger,
       requestIdFactory: () => 'unknown-error',
       routers: [{ path: '/api/test', router: testRouter() }],
-    })).get('/api/test/unknown-error?token=query-session-cookie');
+    })).get('/api/test/leak/reset-token-secret?token=query-session-cookie');
 
     assert.equal(response.status, 500);
     assert.deepEqual(response.body, {
@@ -441,14 +508,13 @@ describe('JSON 请求体与统一错误处理', () => {
         event: 'http_request_failed',
         requestId: 'unknown-error',
         method: 'GET',
-        path: '/api/test/unknown-error',
         errorType: 'INTERNAL_ERROR',
       },
       message: '请求处理失败',
     });
     assert.doesNotMatch(
       inspect(logger.entries),
-      /internal-db-password|password|hash|session|cookie|postgresql:|query-session-cookie/iu,
+      /password|hash|session|cookie|postgresql:|reset-token-secret|query-session-cookie/iu,
     );
   });
 

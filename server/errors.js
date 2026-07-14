@@ -31,6 +31,24 @@ function toPublicError(error) {
     });
   }
 
+  if (error?.type === 'request.aborted') {
+    return new AppError({
+      status: 400,
+      code: 'REQUEST_ABORTED',
+      message: '请求体传输未完成',
+      cause: error,
+    });
+  }
+
+  if (error?.type === 'request.size.invalid') {
+    return new AppError({
+      status: 400,
+      code: 'REQUEST_SIZE_INVALID',
+      message: '请求体长度与声明不一致',
+      cause: error,
+    });
+  }
+
   if (error?.type === 'charset.unsupported' || error?.type === 'encoding.unsupported') {
     return new AppError({
       status: 415,
@@ -57,7 +75,6 @@ function logServerError(logger, publicError, req) {
     event: 'http_request_failed',
     requestId: req.requestId,
     method: req.method,
-    path: req.path,
     errorType: publicError.code,
   };
 
