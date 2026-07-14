@@ -96,6 +96,7 @@ export function createInitialState(random = Math.random) {
   const snake = INITIAL_SNAKE.map((cell) => ({ ...cell }));
 
   return {
+    boardSize: BOARD_SIZE,
     snake,
     direction: 'right',
     food: pickFoodCell(snake, random),

@@ -55,6 +55,7 @@ describe('常量、初始状态和食物生成', () => {
     const second = createInitialState(() => 0);
 
     assert.deepEqual(first, {
+      boardSize: BOARD_SIZE,
       snake: INITIAL_SNAKE,
       direction: 'right',
       food: { x: 0, y: 0 },
@@ -65,6 +66,7 @@ describe('常量、初始状态和食物生成', () => {
       intervalMs: 140,
       turnAccepted: false,
     });
+    assert.equal(first.boardSize, 20);
     assert.notStrictEqual(first, second);
     assert.notStrictEqual(first.snake, second.snake);
     assert.notStrictEqual(first.snake[0], second.snake[0]);
