@@ -18,51 +18,62 @@ class RecordingPool {
   }
 }
 
-function createResetPool(databaseName, { failOnSql, failOnRollback = false } = {}) {
-  const queries = [];
-  const releaseArguments = [];
-  const operationError = new Error('reset-operation-secret');
-  const rollbackError = new Error('reset-rollback-secret');
-  let releases = 0;
-  let connectCalls = 0;
-  const client = {
-    async query(text) {
-      queries.push(text);
-      if (text === 'SELECT current_database() AS database_name') {
-        return { rows: [{ database_name: databaseName }] };
-      }
-      if (text === failOnSql) {
-        throw operationError;
-      }
-      if (text === 'ROLLBACK' && failOnRollback) {
-        throw rollbackError;
-      }
-      return { rows: [] };
-    },
-    release(error) {
-      releases += 1;
-      releaseArguments.push(error);
-    },
-  };
+class ResettablePool {
+  constructor(options) {
+    const parsed = new URL(options.connectionString);
+    this.options = options;
+    this.actualDatabaseName = decodeURIComponent(parsed.pathname.slice(1));
+    this.actualUserName = decodeURIComponent(parsed.username);
+    this.queries = [];
+    this.releaseArguments = [];
+    this.operationError = new Error('reset-operation-secret');
+    this.rollbackError = new Error('reset-rollback-secret');
+    this.failOnSql = null;
+    this.failOnRollback = false;
+    this.connectCalls = 0;
+    this.releases = 0;
+    this.ended = false;
+  }
 
-  return {
-    pool: {
-      async connect() {
-        connectCalls += 1;
-        return client;
+  async connect() {
+    this.connectCalls += 1;
+    return {
+      query: async (text) => {
+        this.queries.push(text);
+        if (text === this.failOnSql) {
+          throw this.operationError;
+        }
+        if (text === 'SELECT current_database() AS database_name, current_user AS user_name') {
+          return {
+            rows: [{
+              database_name: this.actualDatabaseName,
+              user_name: this.actualUserName,
+            }],
+          };
+        }
+        if (text === 'ROLLBACK' && this.failOnRollback) {
+          throw this.rollbackError;
+        }
+        return { rows: [] };
       },
-    },
-    queries,
-    operationError,
-    releaseArguments,
-    rollbackError,
-    get connectCalls() {
-      return connectCalls;
-    },
-    get releases() {
-      return releases;
-    },
-  };
+      release: (error) => {
+        this.releases += 1;
+        this.releaseArguments.push(error);
+      },
+    };
+  }
+
+  async end() {
+    this.ended = true;
+  }
+}
+
+function createBoundResetPool(databaseUrl = 'postgresql://snake:secret@db/snake_test') {
+  return createTestPool({ databaseUrl, PoolImpl: ResettablePool });
+}
+
+function ddlQueries(pool) {
+  return pool.queries.filter((sql) => /^(?:ALTER|CREATE|DROP|TRUNCATE)\s/iu.test(sql));
 }
 
 describe('测试数据库 URL 安全边界', () => {
@@ -77,7 +88,7 @@ describe('测试数据库 URL 安全边界', () => {
     }), testUrl);
   });
 
-  test('安全校验接受数据库名含 _test 或 -test 的 PostgreSQL URL', () => {
+  test('安全校验只接受数据库名严格以 _test 或 -test 结尾的 PostgreSQL URL', () => {
     assert.equal(
       assertSafeTestDatabaseUrl('postgresql://snake:secret@db/snake_test'),
       'postgresql://snake:secret@db/snake_test',
@@ -86,6 +97,16 @@ describe('测试数据库 URL 安全边界', () => {
       assertSafeTestDatabaseUrl('postgres://snake:secret@db/docker-snake-test?sslmode=require'),
       'postgres://snake:secret@db/docker-snake-test?sslmode=require',
     );
+
+    for (const unsafeUrl of [
+      'postgresql://snake:secret@db/prod_test_backup',
+      'postgresql://snake:secret@db/prod-test-backup',
+    ]) {
+      assert.throws(
+        () => assertSafeTestDatabaseUrl(unsafeUrl),
+        /必须以 _test 或 -test 结尾/u,
+      );
+    }
   });
 
   test('拒绝非测试库或非法 URL 且不回显密码', () => {
@@ -104,6 +125,21 @@ describe('测试数据库 URL 安全边界', () => {
         ),
       );
     }
+  });
+
+  test('要求显式数据库用户，并按 URL 规则解码用户身份', async () => {
+    assert.throws(
+      () => assertSafeTestDatabaseUrl('postgresql://db.example.test/snake_test'),
+      /必须显式包含数据库用户/u,
+    );
+
+    const pool = createBoundResetPool(
+      'postgresql://snake%5Fuser:secret@db.example.test/snake_test',
+    );
+    await resetTestDatabase({ pool });
+
+    assert.equal(pool.actualUserName, 'snake_user');
+    assert.equal(pool.releases, 1);
   });
 });
 
@@ -133,84 +169,129 @@ describe('测试 Pool 生命周期助手', () => {
         databaseUrl: 'postgresql://snake:production-secret@db/snake',
         PoolImpl: RecordingPool,
       }),
-      /名称包含 _test 或 -test/u,
+      /必须以 _test 或 -test 结尾/u,
     );
     assert.equal(RecordingPool.instances.length, 0);
   });
 
-  test('resetTestDatabase 在校验通过后重建 public schema', async () => {
-    const recorder = createResetPool('snake_test');
+  test('resetTestDatabase 在校验通过后只清理本项目已知表', async () => {
+    const pool = createBoundResetPool();
 
-    await resetTestDatabase({
-      pool: recorder.pool,
-      databaseUrl: 'postgresql://snake:secret@db/snake_test',
-    });
+    await resetTestDatabase({ pool });
 
-    assert.deepEqual(recorder.queries, [
-      'SELECT current_database() AS database_name',
+    assert.deepEqual(pool.queries, [
+      'SELECT current_database() AS database_name, current_user AS user_name',
       'BEGIN',
-      'DROP SCHEMA public CASCADE',
-      'CREATE SCHEMA public',
+      'DROP TABLE IF EXISTS public.user_sessions',
+      'DROP TABLE IF EXISTS public.users',
+      'DROP TABLE IF EXISTS public.schema_migrations',
       'COMMIT',
     ]);
-    assert.equal(recorder.connectCalls, 1);
-    assert.equal(recorder.releases, 1);
+    assert.equal(pool.connectCalls, 1);
+    assert.equal(pool.releases, 1);
+    assert.doesNotMatch(pool.queries.join('\n'), /DROP\s+SCHEMA|CASCADE/iu);
   });
 
   test('resetTestDatabase 对非测试库不会发送任何 SQL', async () => {
-    const recorder = createResetPool('snake');
+    const instancesBefore = RecordingPool.instances.length;
 
-    await assert.rejects(
-      resetTestDatabase({
-        pool: recorder.pool,
-        databaseUrl: 'postgresql://snake:production-secret@db/snake',
+    assert.throws(
+      () => createTestPool({
+        databaseUrl: 'postgresql://snake:production-secret@db/prod_test_backup',
+        PoolImpl: RecordingPool,
       }),
-      /测试数据库/u,
+      /必须以 _test 或 -test 结尾/u,
     );
-    assert.deepEqual(recorder.queries, []);
-    assert.equal(recorder.connectCalls, 0);
+    assert.equal(RecordingPool.instances.length, instancesBefore);
   });
 
-  test('resetTestDatabase 拒绝 URL 与 Pool 实际数据库不匹配且不执行破坏 SQL', async () => {
-    const recorder = createResetPool('production');
+  test('resetTestDatabase 拒绝并非由 helper 创建的同名同用户 Pool', async () => {
+    const roguePool = new ResettablePool({
+      connectionString: 'postgresql://snake:secret@other.example.test/snake_test',
+    });
 
     await assert.rejects(
       resetTestDatabase({
-        pool: recorder.pool,
+        pool: roguePool,
         databaseUrl: 'postgresql://snake:test-secret@db/snake_test',
       }),
-      /实际连接.*测试数据库.*不匹配/u,
+      /必须由 createTestPool 创建/u,
     );
 
-    assert.deepEqual(recorder.queries, ['SELECT current_database() AS database_name']);
-    assert.equal(recorder.releases, 1);
+    assert.deepEqual(roguePool.queries, []);
+    assert.equal(roguePool.connectCalls, 0);
+  });
+
+  test('resetTestDatabase 核对实际数据库与用户且身份不符时不发送 DDL', async (t) => {
+    await t.test('数据库不匹配', async () => {
+      const pool = createBoundResetPool();
+      pool.actualDatabaseName = 'other_test';
+      let mismatchError;
+
+      await assert.rejects(
+        resetTestDatabase({ pool }),
+        (error) => {
+          mismatchError = error;
+          return /实际连接身份.*不匹配/u.test(error.message);
+        },
+      );
+
+      assert.deepEqual(ddlQueries(pool), []);
+      assert.equal(pool.releases, 1);
+      assert.doesNotMatch(
+        mismatchError.message,
+        /secret|snake_test|other_test|snake(?:_user)?|production_owner/u,
+      );
+    });
+
+    await t.test('用户不匹配', async () => {
+      const pool = createBoundResetPool();
+      pool.actualUserName = 'production_owner';
+
+      await assert.rejects(resetTestDatabase({ pool }), /实际连接身份.*不匹配/u);
+
+      assert.deepEqual(ddlQueries(pool), []);
+      assert.equal(pool.releases, 1);
+    });
+  });
+
+  test('身份查询失败时不发送 DDL 并正常释放 client', async () => {
+    const pool = createBoundResetPool();
+    pool.failOnSql = 'SELECT current_database() AS database_name, current_user AS user_name';
+
+    await assert.rejects(
+      resetTestDatabase({ pool }),
+      (error) => error === pool.operationError,
+    );
+
+    assert.deepEqual(ddlQueries(pool), []);
+    assert.equal(pool.releases, 1);
+    assert.equal(pool.releaseArguments[0], undefined);
   });
 
   test('resetTestDatabase 的 ROLLBACK 失败时用错误释放 client', async () => {
-    const recorder = createResetPool('snake_test', {
-      failOnSql: 'DROP SCHEMA public CASCADE',
-      failOnRollback: true,
-    });
+    const pool = createBoundResetPool();
+    pool.failOnSql = 'DROP TABLE IF EXISTS public.user_sessions';
+    pool.failOnRollback = true;
 
     await assert.rejects(
-      resetTestDatabase({
-        pool: recorder.pool,
-        databaseUrl: 'postgresql://snake:test-secret@db/snake_test',
-      }),
-      (error) => error === recorder.operationError,
+      resetTestDatabase({ pool }),
+      (error) => error === pool.operationError,
     );
 
-    assert.equal(recorder.releaseArguments[0], recorder.rollbackError);
+    assert.equal(pool.releaseArguments[0], pool.rollbackError);
   });
 
   test('closeTestPool 等待 pool.end', async () => {
-    let ended = false;
-    await closeTestPool({
-      async end() {
-        ended = true;
-      },
-    });
+    const pool = createBoundResetPool();
+    await closeTestPool(pool);
 
-    assert.equal(ended, true);
+    assert.equal(pool.ended, true);
+
+    await assert.rejects(
+      resetTestDatabase({ pool }),
+      /必须由 createTestPool 创建/u,
+    );
+    assert.equal(pool.connectCalls, 0);
   });
 });

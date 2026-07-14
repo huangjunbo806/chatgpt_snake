@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +7,7 @@ import { afterEach, describe, test } from 'node:test';
 import { inspect } from 'node:util';
 
 import {
+  DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS,
   loadMigrations,
   runMigrations,
 } from '../../server/database/migrations.js';
@@ -33,6 +35,10 @@ function compactSql(sql) {
   return sql.trim().replace(/\s+/gu, ' ');
 }
 
+function sha256(sql) {
+  return createHash('sha256').update(sql, 'utf8').digest('hex');
+}
+
 function createLogger() {
   const entries = [];
   return {
@@ -46,8 +52,9 @@ function createLogger() {
   };
 }
 
-function createRecordingPool({ appliedVersions = [], failOnSql, failOnRollback = false } = {}) {
-  const ledger = new Set(appliedVersions);
+function createRecordingPool({ appliedMigrations = [], failOnSql, failOnRollback = false } = {}) {
+  let ledger = new Map(appliedMigrations.map(({ version, checksum }) => [version, checksum]));
+  let transactionLedger = null;
   const calls = [];
   const releaseArguments = [];
   const rollbackError = new Error('rollback-connection-secret');
@@ -65,12 +72,39 @@ function createRecordingPool({ appliedVersions = [], failOnSql, failOnRollback =
         throw rollbackError;
       }
 
-      if (/^SELECT\s+version\s+FROM\s+schema_migrations/iu.test(compactSql(text))) {
-        return { rows: [...ledger].map((version) => ({ version })) };
+      const compact = compactSql(text);
+      if (compact === 'BEGIN') {
+        transactionLedger = new Map(ledger);
       }
 
-      if (/^INSERT\s+INTO\s+schema_migrations/iu.test(compactSql(text))) {
-        ledger.add(values[0]);
+      if (/^SELECT\s+version,\s*checksum\s+FROM\s+public\.schema_migrations/iu.test(compact)) {
+        const activeLedger = transactionLedger ?? ledger;
+        return {
+          rows: [...activeLedger].map(([version, checksum]) => ({ version, checksum })),
+        };
+      }
+
+      if (/^INSERT\s+INTO\s+public\.schema_migrations/iu.test(compact)) {
+        (transactionLedger ?? ledger).set(values[0], values[1]);
+      }
+
+      if (/^UPDATE\s+public\.schema_migrations\s+SET\s+checksum/iu.test(compact)) {
+        const activeLedger = transactionLedger ?? ledger;
+        const [checksum, version] = values;
+        if (activeLedger.get(version) === null) {
+          activeLedger.set(version, checksum);
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      }
+
+      if (compact === 'COMMIT') {
+        ledger = transactionLedger ?? ledger;
+        transactionLedger = null;
+      }
+
+      if (compact === 'ROLLBACK') {
+        transactionLedger = null;
       }
 
       return { rows: [] };
@@ -92,7 +126,9 @@ function createRecordingPool({ appliedVersions = [], failOnSql, failOnRollback =
       },
     },
     calls,
-    ledger,
+    get ledger() {
+      return ledger;
+    },
     releaseArguments,
     rollbackError,
     get releases() {
@@ -113,7 +149,7 @@ describe('loadMigrations', () => {
     assert.equal(Object.isFrozen(migrations[0]), true);
 
     const sql = compactSql(migrations[0].sql);
-    assert.match(sql, /CREATE TABLE users/iu);
+    assert.match(sql, /CREATE TABLE public\.users/iu);
     assert.match(sql, /id bigserial PRIMARY KEY/iu);
     assert.match(sql, /username varchar\(20\) NOT NULL/iu);
     assert.match(sql, /CONSTRAINT users_username_unique UNIQUE\s*\(username\)/iu);
@@ -125,12 +161,12 @@ describe('loadMigrations', () => {
     assert.match(sql, /best_score\s*=\s*0\s+AND\s+best_score_at\s+IS\s+NULL/iu);
     assert.match(sql, /best_score\s*>\s*0\s+AND\s+best_score_at\s+IS\s+NOT\s+NULL/iu);
     assert.match(sql, /created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP/iu);
-    assert.match(sql, /CREATE INDEX users_leaderboard_order_idx\s+ON users\s*\(best_score DESC, best_score_at ASC, id ASC\)\s+WHERE best_score > 0/iu);
-    assert.match(sql, /CREATE TABLE user_sessions/iu);
+    assert.match(sql, /CREATE INDEX users_leaderboard_order_idx\s+ON public\.users\s*\(best_score DESC, best_score_at ASC, id ASC\)\s+WHERE best_score > 0/iu);
+    assert.match(sql, /CREATE TABLE public\.user_sessions/iu);
     assert.match(sql, /sid varchar[^,]*PRIMARY KEY/iu);
     assert.match(sql, /sess json NOT NULL/iu);
     assert.match(sql, /expire timestamp\(6\) NOT NULL/iu);
-    assert.match(sql, /CREATE INDEX user_sessions_expire_idx\s+ON user_sessions\s*\(expire\)/iu);
+    assert.match(sql, /CREATE INDEX user_sessions_expire_idx\s+ON public\.user_sessions\s*\(expire\)/iu);
     assert.doesNotMatch(sql, /schema_migrations/iu);
     assert.doesNotMatch(sql, /FOREIGN KEY|REFERENCES users/iu);
   });
@@ -172,16 +208,30 @@ describe('loadMigrations', () => {
       /迁移版本前缀.*001.*重复/u,
     );
   });
+
+  test('拒绝只含空白字符的迁移文件', async () => {
+    const migrationsDir = await createMigrationsDirectory({
+      '001-blank.sql': ' \n\t\uFEFF',
+    });
+
+    await assert.rejects(
+      loadMigrations({ migrationsDir }),
+      /迁移.*001-blank\.sql.*SQL.*不能为空/u,
+    );
+  });
 });
 
 describe('runMigrations', () => {
   test('在同一 client 的事务与 advisory lock 内按版本执行未应用迁移', async () => {
-    const recorder = createRecordingPool({ appliedVersions: ['002-second.sql'] });
+    const secondSql = "SELECT 'second-body';";
+    const recorder = createRecordingPool({
+      appliedMigrations: [{ version: '002-second.sql', checksum: sha256(secondSql) }],
+    });
     const logger = createLogger();
     const migrations = [
       { version: '003-third.sql', sql: "SELECT 'third-body';" },
       { version: '001-first.sql', sql: "SELECT 'first-body';" },
-      { version: '002-second.sql', sql: "SELECT 'second-body';" },
+      { version: '002-second.sql', sql: secondSql },
     ];
 
     const applied = await runMigrations({ pool: recorder.pool, migrations, logger });
@@ -192,23 +242,35 @@ describe('runMigrations', () => {
 
     const statements = recorder.calls.map(({ text }) => compactSql(text));
     assert.equal(statements[0], 'BEGIN');
-    assert.match(statements[1], /^SELECT pg_advisory_xact_lock\(hashtext\(\$1\)\)$/iu);
-    assert.deepEqual(recorder.calls[1].values, ['docker_snake:schema-migrations']);
-    assert.match(statements[2], /^CREATE TABLE IF NOT EXISTS schema_migrations/iu);
-    assert.match(statements[2], /version varchar\(255\) PRIMARY KEY/iu);
-    assert.match(statements[2], /applied_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP/iu);
-    assert.match(statements[3], /^SELECT version FROM schema_migrations/iu);
-    assert.equal(statements[4], "SELECT 'first-body';");
-    assert.match(statements[5], /^INSERT INTO schema_migrations\s*\(version\)\s*VALUES\s*\(\$1\)$/iu);
-    assert.deepEqual(recorder.calls[5].values, ['001-first.sql']);
-    assert.equal(statements[6], "SELECT 'third-body';");
-    assert.deepEqual(recorder.calls[7].values, ['003-third.sql']);
-    assert.equal(statements[8], 'COMMIT');
+    assert.match(statements[1], /^SELECT set_config\('statement_timeout', \$1, true\)$/iu);
+    assert.equal(DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS, 30_000);
+    assert.deepEqual(recorder.calls[1].values, [`${DATABASE_MIGRATION_STATEMENT_TIMEOUT_MS}ms`]);
+    assert.match(statements[2], /^SELECT pg_advisory_xact_lock\(hashtext\(\$1\)\)$/iu);
+    assert.deepEqual(recorder.calls[2].values, ['docker_snake:schema-migrations']);
+    assert.match(statements[3], /^CREATE TABLE IF NOT EXISTS public\.schema_migrations/iu);
+    assert.match(statements[3], /version varchar\(255\) PRIMARY KEY/iu);
+    assert.match(statements[3], /checksum char\(64\) NOT NULL/iu);
+    assert.match(statements[3], /applied_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP/iu);
+    assert.match(statements[4], /^ALTER TABLE public\.schema_migrations ADD COLUMN IF NOT EXISTS checksum char\(64\)$/iu);
+    assert.match(statements[5], /^SELECT version, checksum FROM public\.schema_migrations/iu);
+    assert.match(statements[6], /^ALTER TABLE public\.schema_migrations ALTER COLUMN checksum SET NOT NULL$/iu);
+    assert.equal(statements[7], "SELECT 'first-body';");
+    assert.match(statements[8], /^INSERT INTO public\.schema_migrations\s*\(version, checksum\)\s*VALUES\s*\(\$1, \$2\)$/iu);
+    assert.deepEqual(recorder.calls[8].values, [
+      '001-first.sql',
+      sha256("SELECT 'first-body';"),
+    ]);
+    assert.equal(statements[9], "SELECT 'third-body';");
+    assert.deepEqual(recorder.calls[10].values, [
+      '003-third.sql',
+      sha256("SELECT 'third-body';"),
+    ]);
+    assert.equal(statements[11], 'COMMIT');
     assert.equal(statements.includes("SELECT 'second-body';"), false);
     assert.deepEqual([...recorder.ledger].sort(), [
-      '001-first.sql',
-      '002-second.sql',
-      '003-third.sql',
+      ['001-first.sql', sha256("SELECT 'first-body';")],
+      ['002-second.sql', sha256(secondSql)],
+      ['003-third.sql', sha256("SELECT 'third-body';")],
     ]);
     assert.deepEqual(logger.entries, [
       [{ event: 'database_migration_applied', version: '001-first.sql' }],
@@ -231,11 +293,148 @@ describe('runMigrations', () => {
       index > secondBegin && /pg_advisory_xact_lock/iu.test(sql)
     ));
     const secondLedgerRead = statements.findIndex((sql, index) => (
-      index > secondBegin && /^SELECT version FROM schema_migrations/iu.test(sql)
+      index > secondBegin && /^SELECT version, checksum FROM public\.schema_migrations/iu.test(sql)
     ));
     assert.ok(secondBegin >= 0 && secondLock > secondBegin && secondLedgerRead > secondLock);
     assert.equal(statements.at(-1), 'COMMIT');
     assert.equal(recorder.releases, 2);
+  });
+
+  test('用 SQL 原始字节的 SHA-256 写入 ledger', async () => {
+    const recorder = createRecordingPool();
+
+    await runMigrations({
+      pool: recorder.pool,
+      migrations: [{ version: '001-sha.sql', sql: 'SELECT 1;' }],
+      logger: createLogger(),
+    });
+
+    const insert = recorder.calls.find(({ text }) => (
+      /^INSERT INTO public\.schema_migrations/iu.test(compactSql(text))
+    ));
+    assert.deepEqual(insert.values, [
+      '001-sha.sql',
+      '17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a',
+    ]);
+  });
+
+  test('在同一锁事务内为旧版仅 version ledger 建立 checksum 基线', async () => {
+    const sql = "SELECT 'legacy-already-applied';";
+    const recorder = createRecordingPool({
+      appliedMigrations: [{ version: '001-legacy.sql', checksum: null }],
+    });
+
+    const applied = await runMigrations({
+      pool: recorder.pool,
+      migrations: [{ version: '001-legacy.sql', sql }],
+      logger: createLogger(),
+    });
+
+    assert.deepEqual(applied, []);
+    const statements = recorder.calls.map(({ text }) => compactSql(text));
+    const lockIndex = statements.findIndex((statement) => /pg_advisory_xact_lock/iu.test(statement));
+    const addColumnIndex = statements.findIndex((statement) => (
+      /^ALTER TABLE public\.schema_migrations ADD COLUMN/iu.test(statement)
+    ));
+    const backfillIndex = statements.findIndex((statement) => (
+      /^UPDATE public\.schema_migrations SET checksum/iu.test(statement)
+    ));
+    const notNullIndex = statements.findIndex((statement) => (
+      /^ALTER TABLE public\.schema_migrations ALTER COLUMN checksum SET NOT NULL$/iu.test(statement)
+    ));
+    assert.ok(lockIndex >= 0 && addColumnIndex > lockIndex);
+    assert.ok(backfillIndex > addColumnIndex && notNullIndex > backfillIndex);
+    assert.deepEqual(recorder.calls[backfillIndex].values, [
+      sha256(sql),
+      '001-legacy.sql',
+    ]);
+    assert.equal(statements.includes(sql), false);
+    assert.equal(statements.at(-1), 'COMMIT');
+    assert.deepEqual([...recorder.ledger], [['001-legacy.sql', sha256(sql)]]);
+  });
+
+  test('旧版 ledger 缺少对应迁移文件时受控拒绝且不写入基线', async () => {
+    const recorder = createRecordingPool({
+      appliedMigrations: [{ version: '001-missing.sql', checksum: null }],
+    });
+
+    await assert.rejects(
+      runMigrations({
+        pool: recorder.pool,
+        migrations: [{ version: '002-present.sql', sql: 'SELECT 2;' }],
+        logger: createLogger(),
+      }),
+      /旧版迁移完整性记录.*完整迁移集合/u,
+    );
+
+    const statements = recorder.calls.map(({ text }) => compactSql(text));
+    assert.equal(statements.some((sql) => /^UPDATE public\.schema_migrations/iu.test(sql)), false);
+    assert.equal(statements.includes('SELECT 2;'), false);
+    assert.equal(statements.at(-1), 'ROLLBACK');
+    assert.deepEqual([...recorder.ledger], [['001-missing.sql', null]]);
+  });
+
+  test('已记录 checksum 的迁移文件被删除时也拒绝继续', async () => {
+    const recorder = createRecordingPool({
+      appliedMigrations: [{ version: '001-deleted.sql', checksum: sha256('SELECT 1;') }],
+    });
+
+    await assert.rejects(
+      runMigrations({
+        pool: recorder.pool,
+        migrations: [{ version: '002-present.sql', sql: 'SELECT 2;' }],
+        logger: createLogger(),
+      }),
+      /已应用迁移.*001-deleted\.sql.*当前迁移文件集合中缺失/u,
+    );
+
+    const statements = recorder.calls.map(({ text }) => compactSql(text));
+    assert.equal(statements.includes('SELECT 2;'), false);
+    assert.equal(statements.at(-1), 'ROLLBACK');
+  });
+
+  test('checksum 漂移会在任何待执行正文前失败并回滚', async () => {
+    const originalSql = "SELECT 'original';";
+    const recorder = createRecordingPool({
+      appliedMigrations: [{ version: '002-applied.sql', checksum: sha256(originalSql) }],
+    });
+
+    await assert.rejects(
+      runMigrations({
+        pool: recorder.pool,
+        migrations: [
+          { version: '001-pending.sql', sql: "SELECT 'must-not-run';" },
+          { version: '002-applied.sql', sql: "SELECT 'changed';" },
+        ],
+        logger: createLogger(),
+      }),
+      /SHA-256 校验和.*不一致/u,
+    );
+
+    const statements = recorder.calls.map(({ text }) => compactSql(text));
+    assert.equal(statements.includes("SELECT 'must-not-run';"), false);
+    assert.equal(statements.some((sql) => /^INSERT INTO public\.schema_migrations/iu.test(sql)), false);
+    assert.equal(statements.at(-1), 'ROLLBACK');
+    assert.deepEqual([...recorder.ledger], [['002-applied.sql', sha256(originalSql)]]);
+  });
+
+  test('已应用版本的三位前缀相同但文件名变化时拒绝执行', async () => {
+    const recorder = createRecordingPool({
+      appliedMigrations: [{ version: '001-old-name.sql', checksum: sha256('SELECT 1;') }],
+    });
+
+    await assert.rejects(
+      runMigrations({
+        pool: recorder.pool,
+        migrations: [{ version: '001-new-name.sql', sql: 'SELECT 1;' }],
+        logger: createLogger(),
+      }),
+      /迁移版本前缀.*001.*不能改名/u,
+    );
+
+    const statements = recorder.calls.map(({ text }) => compactSql(text));
+    assert.equal(statements.includes('SELECT 1;'), false);
+    assert.equal(statements.at(-1), 'ROLLBACK');
   });
 
   test('正文失败时回滚、释放 client、原样抛错且日志不泄漏', async () => {
@@ -258,6 +457,26 @@ describe('runMigrations', () => {
     assert.equal(recorder.releases, 1);
     assert.deepEqual(logger.entries, [[{ event: 'database_migration_failed' }]]);
     assert.doesNotMatch(inspect(logger.entries), /migration-secret|migration-body-secret|postgresql|Error/u);
+  });
+
+  test('后续正文失败时会回滚本次已执行正文与 ledger 写入', async () => {
+    const failingSql = "SELECT 'failing-body';";
+    const recorder = createRecordingPool({ failOnSql: failingSql });
+
+    await assert.rejects(
+      runMigrations({
+        pool: recorder.pool,
+        migrations: [
+          { version: '001-first.sql', sql: "SELECT 'successful-body';" },
+          { version: '002-failing.sql', sql: failingSql },
+        ],
+        logger: createLogger(),
+      }),
+      /migration-secret/u,
+    );
+
+    assert.deepEqual([...recorder.ledger], []);
+    assert.equal(compactSql(recorder.calls.at(-1).text), 'ROLLBACK');
   });
 
   test('ROLLBACK 失败时用错误释放 client 但仍抛出原始迁移错误', async () => {
@@ -343,6 +562,16 @@ describe('runMigrations', () => {
           migrations: [{ version: '001-valid.sql', sql: null }],
         }),
         /迁移.*SQL.*字符串/u,
+      );
+    });
+
+    await t.test('SQL 只含空白', async () => {
+      await assert.rejects(
+        runMigrations({
+          pool: recorder.pool,
+          migrations: [{ version: '001-blank.sql', sql: ' \n\t\uFEFF' }],
+        }),
+        /迁移.*SQL.*不能为空/u,
       );
     });
 

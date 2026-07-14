@@ -31,6 +31,7 @@ describe('createPostgresSessionStore', () => {
 
     assert.ok(store instanceof RecordingStore);
     assert.equal(store.options.pool, pool);
+    assert.equal(store.options.schemaName, 'public');
     assert.equal(store.options.tableName, 'user_sessions');
     assert.equal(store.options.createTableIfMissing, false);
     assert.equal(store.options.disableTouch, true);
@@ -42,6 +43,7 @@ describe('createPostgresSessionStore', () => {
       'errorLog',
       'pool',
       'pruneSessionInterval',
+      'schemaName',
       'tableName',
     ]);
     assert.equal(RecordingStore.options[0], store.options);

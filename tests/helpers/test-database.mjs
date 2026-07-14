@@ -1,6 +1,7 @@
 import pg from 'pg';
 
 const { Pool } = pg;
+const testPoolIdentities = new WeakMap();
 
 function parseTestDatabaseUrl(databaseUrl) {
   if (typeof databaseUrl !== 'string' || !databaseUrl.trim()) {
@@ -19,22 +20,35 @@ function parseTestDatabaseUrl(databaseUrl) {
   }
 
   let databaseName;
+  let userName;
   try {
     databaseName = decodeURIComponent(parsed.pathname.slice(1));
+    userName = decodeURIComponent(parsed.username);
   } catch {
-    throw new Error('TEST_DATABASE_URL 必须包含有效的数据库名');
+    throw new Error('TEST_DATABASE_URL 必须包含有效的数据库名和用户');
   }
 
   if (!databaseName || databaseName.includes('/')) {
     throw new Error('TEST_DATABASE_URL 必须包含有效的数据库名');
   }
+  if (!userName) {
+    throw new Error('TEST_DATABASE_URL 必须显式包含数据库用户');
+  }
 
-  return { databaseName };
+  return { databaseName, userName };
 }
 
 function isSafeDatabaseName(databaseName) {
   return typeof databaseName === 'string'
-    && (databaseName.includes('_test') || databaseName.includes('-test'));
+    && /(?:_test|-test)$/u.test(databaseName);
+}
+
+function parseSafeTestDatabaseIdentity(databaseUrl) {
+  const identity = parseTestDatabaseUrl(databaseUrl);
+  if (!isSafeDatabaseName(identity.databaseName)) {
+    throw new Error('TEST_DATABASE_URL 的数据库名必须以 _test 或 -test 结尾');
+  }
+  return Object.freeze(identity);
 }
 
 export function getTestDatabaseUrl(env = process.env) {
@@ -43,11 +57,7 @@ export function getTestDatabaseUrl(env = process.env) {
 }
 
 export function assertSafeTestDatabaseUrl(databaseUrl) {
-  const { databaseName } = parseTestDatabaseUrl(databaseUrl);
-  if (!isSafeDatabaseName(databaseName)) {
-    throw new Error('TEST_DATABASE_URL 必须指向名称包含 _test 或 -test 的测试数据库');
-  }
-
+  parseSafeTestDatabaseIdentity(databaseUrl);
   return databaseUrl;
 }
 
@@ -55,14 +65,16 @@ export function createTestPool({
   databaseUrl = getTestDatabaseUrl(),
   PoolImpl = Pool,
 } = {}) {
-  assertSafeTestDatabaseUrl(databaseUrl);
-  return new PoolImpl({ connectionString: databaseUrl });
+  const identity = parseSafeTestDatabaseIdentity(databaseUrl);
+  const pool = new PoolImpl({ connectionString: databaseUrl });
+  testPoolIdentities.set(pool, identity);
+  return pool;
 }
 
-export async function resetTestDatabase({ pool, databaseUrl = getTestDatabaseUrl() } = {}) {
-  const { databaseName: expectedDatabaseName } = parseTestDatabaseUrl(databaseUrl);
-  if (!isSafeDatabaseName(expectedDatabaseName)) {
-    throw new Error('TEST_DATABASE_URL 必须指向名称包含 _test 或 -test 的测试数据库');
+export async function resetTestDatabase({ pool } = {}) {
+  const expectedIdentity = testPoolIdentities.get(pool);
+  if (!expectedIdentity) {
+    throw new Error('resetTestDatabase 的 pool 必须由 createTestPool 创建');
   }
   if (!pool || typeof pool.connect !== 'function') {
     throw new Error('resetTestDatabase 需要可连接的测试 pool');
@@ -73,16 +85,23 @@ export async function resetTestDatabase({ pool, databaseUrl = getTestDatabaseUrl
   let releaseError;
 
   try {
-    const databaseResult = await client.query('SELECT current_database() AS database_name');
-    const actualDatabaseName = databaseResult.rows[0]?.database_name;
-    if (!isSafeDatabaseName(actualDatabaseName) || actualDatabaseName !== expectedDatabaseName) {
-      throw new Error('Pool 实际连接的测试数据库与 TEST_DATABASE_URL 不匹配');
+    const identityResult = await client.query(
+      'SELECT current_database() AS database_name, current_user AS user_name',
+    );
+    const actualIdentity = identityResult.rows[0];
+    if (
+      !isSafeDatabaseName(actualIdentity?.database_name)
+      || actualIdentity.database_name !== expectedIdentity.databaseName
+      || actualIdentity.user_name !== expectedIdentity.userName
+    ) {
+      throw new Error('Pool 实际连接身份与已验证的 TEST_DATABASE_URL 不匹配');
     }
 
-    await client.query('BEGIN');
     transactionStarted = true;
-    await client.query('DROP SCHEMA public CASCADE');
-    await client.query('CREATE SCHEMA public');
+    await client.query('BEGIN');
+    await client.query('DROP TABLE IF EXISTS public.user_sessions');
+    await client.query('DROP TABLE IF EXISTS public.users');
+    await client.query('DROP TABLE IF EXISTS public.schema_migrations');
     await client.query('COMMIT');
     transactionStarted = false;
   } catch (error) {
@@ -105,5 +124,9 @@ export async function closeTestPool(pool) {
     throw new Error('closeTestPool 需要可关闭的测试 pool');
   }
 
-  await pool.end();
+  try {
+    await pool.end();
+  } finally {
+    testPoolIdentities.delete(pool);
+  }
 }

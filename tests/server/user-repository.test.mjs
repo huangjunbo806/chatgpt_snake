@@ -65,7 +65,7 @@ describe('createUserRepository', () => {
     });
     assert.equal(Object.isFrozen(user), true);
     assert.equal('passwordHash' in user, false);
-    assert.match(pool.calls[0].text, /^\s*INSERT\s+INTO\s+users/iu);
+    assert.match(pool.calls[0].text, /^\s*INSERT\s+INTO\s+public\.users/iu);
     assert.match(pool.calls[0].text, /RETURNING/iu);
     assertValuesOnly(pool.calls[0], [username, passwordHash]);
   });
@@ -96,6 +96,7 @@ describe('createUserRepository', () => {
     assert.equal(Object.isFrozen(credentials), true);
     assert.match(pool.calls[0].text, /^\s*SELECT/iu);
     assert.match(pool.calls[0].text, /password_hash/iu);
+    assert.match(pool.calls[0].text, /FROM\s+public\.users/iu);
     assertValuesOnly(pool.calls[0], [username]);
   });
 
@@ -121,6 +122,7 @@ describe('createUserRepository', () => {
     });
     assert.equal('passwordHash' in user, false);
     assert.doesNotMatch(pool.calls[0].text, /password_hash/iu);
+    assert.match(pool.calls[0].text, /FROM\s+public\.users/iu);
     assertValuesOnly(pool.calls[0], [id]);
   });
 

@@ -1,4 +1,4 @@
-CREATE TABLE users (
+CREATE TABLE public.users (
   id bigserial PRIMARY KEY,
   username varchar(20) NOT NULL,
   password_hash text NOT NULL,
@@ -18,14 +18,14 @@ CREATE TABLE users (
 );
 
 CREATE INDEX users_leaderboard_order_idx
-  ON users (best_score DESC, best_score_at ASC, id ASC)
+  ON public.users (best_score DESC, best_score_at ASC, id ASC)
   WHERE best_score > 0;
 
-CREATE TABLE user_sessions (
+CREATE TABLE public.user_sessions (
   sid varchar PRIMARY KEY,
   sess json NOT NULL,
   expire timestamp(6) NOT NULL
 );
 
 CREATE INDEX user_sessions_expire_idx
-  ON user_sessions (expire);
+  ON public.user_sessions (expire);

@@ -27,6 +27,7 @@ export function createPostgresSessionStore({
 
   return new StoreClass({
     pool,
+    schemaName: 'public',
     tableName: 'user_sessions',
     createTableIfMissing: false,
     disableTouch: true,

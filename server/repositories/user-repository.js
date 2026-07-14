@@ -36,7 +36,7 @@ export function createUserRepository({ pool } = {}) {
     try {
       result = await pool.query(
         `
-          INSERT INTO users (username, password_hash)
+          INSERT INTO public.users (username, password_hash)
           VALUES ($1, $2)
           RETURNING id, username, best_score, best_score_at
         `,
@@ -56,7 +56,7 @@ export function createUserRepository({ pool } = {}) {
     const result = await pool.query(
       `
         SELECT id, username, password_hash, best_score, best_score_at
-        FROM users
+        FROM public.users
         WHERE username = $1
       `,
       [username],
@@ -69,7 +69,7 @@ export function createUserRepository({ pool } = {}) {
     const result = await pool.query(
       `
         SELECT id, username, best_score, best_score_at
-        FROM users
+        FROM public.users
         WHERE id = $1
       `,
       [id],

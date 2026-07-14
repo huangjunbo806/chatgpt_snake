@@ -4,6 +4,8 @@ import { describe, test } from 'node:test';
 import { inspect } from 'node:util';
 
 import {
+  DATABASE_CONNECTION_TIMEOUT_MS,
+  DATABASE_HEALTH_QUERY_TIMEOUT_MS,
   createDatabaseHealthCheck,
   createPool,
 } from '../../server/database/pool.js';
@@ -29,14 +31,18 @@ function createLogger() {
 }
 
 describe('createPool', () => {
-  test('只把 databaseUrl 作为 connectionString 交给 Pool 实现', () => {
+  test('用 connectionString 与有限连接截止时间构造 Pool', () => {
     RecordingPool.instances.length = 0;
     const databaseUrl = 'postgresql://snake:pool-secret@db.example.test/snake';
 
     const pool = createPool({ databaseUrl, PoolImpl: RecordingPool });
 
     assert.equal(pool, RecordingPool.instances[0]);
-    assert.deepEqual(pool.options, { connectionString: databaseUrl });
+    assert.deepEqual(pool.options, {
+      connectionString: databaseUrl,
+      connectionTimeoutMillis: DATABASE_CONNECTION_TIMEOUT_MS,
+    });
+    assert.equal(DATABASE_CONNECTION_TIMEOUT_MS, 5_000);
   });
 
   test('拒绝缺失的 databaseUrl 并给出中文错误', () => {
@@ -87,7 +93,11 @@ describe('createDatabaseHealthCheck', () => {
     });
 
     assert.equal(await healthCheck(), true);
-    assert.deepEqual(calls, [['SELECT 1']]);
+    assert.deepEqual(calls, [[{
+      text: 'SELECT 1',
+      query_timeout: DATABASE_HEALTH_QUERY_TIMEOUT_MS,
+    }]]);
+    assert.equal(DATABASE_HEALTH_QUERY_TIMEOUT_MS, 2_000);
   });
 
   test('保留数据库错误身份并向上抛出', async () => {

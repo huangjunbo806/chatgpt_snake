@@ -2,6 +2,9 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
+export const DATABASE_CONNECTION_TIMEOUT_MS = 5_000;
+export const DATABASE_HEALTH_QUERY_TIMEOUT_MS = 2_000;
+
 function safeLogIdleError(logger) {
   try {
     const logError = logger?.error;
@@ -18,7 +21,10 @@ export function createPool({ databaseUrl, PoolImpl = Pool, logger = console } = 
     throw new Error('createPool 的 databaseUrl 不能为空');
   }
 
-  const pool = new PoolImpl({ connectionString: databaseUrl });
+  const pool = new PoolImpl({
+    connectionString: databaseUrl,
+    connectionTimeoutMillis: DATABASE_CONNECTION_TIMEOUT_MS,
+  });
   pool.on('error', () => {
     safeLogIdleError(logger);
   });
@@ -32,7 +38,10 @@ export function createDatabaseHealthCheck({ pool } = {}) {
   }
 
   return async function databaseHealthCheck() {
-    await pool.query('SELECT 1');
+    await pool.query({
+      text: 'SELECT 1',
+      query_timeout: DATABASE_HEALTH_QUERY_TIMEOUT_MS,
+    });
     return true;
   };
 }
