@@ -1,0 +1,103 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+
+const pagePath = new URL('../../client/index.html', import.meta.url);
+
+async function readPage() {
+  return readFile(pagePath, 'utf8');
+}
+
+function openingTagWithId(tagName, id) {
+  return new RegExp(
+    `<${tagName}\\b(?=[^>]*\\bid=["']${id}["'])[^>]*>`,
+    'i',
+  );
+}
+
+test('声明中文 HTML 文档并使用语义化页面区域', async () => {
+  const html = await readPage();
+
+  assert.match(html, /^\s*<!doctype html>/i);
+  assert.match(html, /<html\b(?=[^>]*\blang=["']zh-CN["'])[^>]*>/i);
+  assert.match(html, /<header\b[^>]*>/i);
+  assert.match(html, /<main\b[^>]*>/i);
+  assert.match(html, /<section\b[^>]*>/i);
+  assert.match(html, /<footer\b[^>]*>/i);
+  assert.match(html, /<h1\b[^>]*>[^<]*Docker Snake[^<]*<\/h1>/i);
+  assert.match(html, /<noscript\b[^>]*>[\s\S]*?<\/noscript>/i);
+});
+
+test('提供课程所需的全部页面结构挂载点', async () => {
+  const html = await readPage();
+  const requiredIds = [
+    'session-status',
+    'auth-controls',
+    'current-score',
+    'best-score',
+    'speed-level',
+    'game-status',
+    'game-canvas',
+    'start-game',
+    'toggle-pause',
+    'restart-game',
+    'retry-score',
+    'touch-controls',
+    'leaderboard-section',
+    'leaderboard-status',
+    'leaderboard-list',
+    'my-rank',
+  ];
+
+  for (const id of requiredIds) {
+    assert.match(
+      html,
+      new RegExp(`\\bid=["']${id}["']`, 'i'),
+      `缺少 #${id}`,
+    );
+  }
+});
+
+test('游戏区域公开文字状态、画布回退和基础控制', async () => {
+  const html = await readPage();
+
+  assert.match(
+    html,
+    /<[^>]+(?=[^>]*\bid=["']game-status["'])(?=[^>]*\baria-live=["']polite["'])[^>]*>/i,
+  );
+  assert.match(html, openingTagWithId('canvas', 'game-canvas'));
+  assert.match(
+    html,
+    /<canvas\b(?=[^>]*\bid=["']game-canvas["'])(?=[^>]*\bwidth=["']600["'])(?=[^>]*\bheight=["']600["'])[^>]*>[\s\S]*不支持 Canvas[\s\S]*<\/canvas>/i,
+  );
+
+  for (const id of [
+    'start-game',
+    'toggle-pause',
+    'restart-game',
+    'retry-score',
+  ]) {
+    assert.match(html, openingTagWithId('button', id));
+  }
+});
+
+test('触控区恰好提供四个方向按钮', async () => {
+  const html = await readPage();
+  const directions = [...html.matchAll(/\bdata-direction=["']([^"']+)["']/gi)]
+    .map((match) => match[1].toLowerCase())
+    .sort();
+
+  assert.deepEqual(directions, ['down', 'left', 'right', 'up']);
+});
+
+test('排行榜使用有序列表并保留状态与个人排名', async () => {
+  const html = await readPage();
+
+  assert.match(html, openingTagWithId('section', 'leaderboard-section'));
+  assert.match(html, openingTagWithId('ol', 'leaderboard-list'));
+  assert.match(
+    html,
+    /<[^>]+(?=[^>]*\bid=["']leaderboard-status["'])(?=[^>]*\baria-live=["']polite["'])[^>]*>/i,
+  );
+  assert.match(html, /\bid=["']my-rank["']/i);
+});
