@@ -5,6 +5,8 @@ import { createInputController } from '../../client/scripts/input-controller.js'
 
 const EDITABLE_SELECTOR =
   'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+const INTERACTIVE_SELECTOR =
+  'button, a[href], summary, [role="button"], [role="link"]';
 
 class FakeEventTarget {
   constructor() {
@@ -42,7 +44,9 @@ class FakeElement extends FakeEventTarget {
     tagName = 'div',
     contenteditable,
     direction,
+    href,
     parent = null,
+    role,
   } = {}) {
     super();
     this.tagName = tagName.toLowerCase();
@@ -53,6 +57,8 @@ class FakeElement extends FakeEventTarget {
       this.contenteditable = contenteditable;
     }
     if (direction !== undefined) this.dataset.direction = direction;
+    if (href !== undefined) this.href = href;
+    if (role !== undefined) this.role = role;
   }
 
   matches(selector) {
@@ -66,6 +72,16 @@ class FakeElement extends FakeEventTarget {
 
     if (selector === '[data-direction]') {
       return Object.hasOwn(this.dataset, 'direction');
+    }
+
+    if (selector === INTERACTIVE_SELECTOR) {
+      return (
+        this.tagName === 'button' ||
+        this.tagName === 'summary' ||
+        (this.tagName === 'a' && this.href !== undefined) ||
+        this.role === 'button' ||
+        this.role === 'link'
+      );
     }
 
     return false;
@@ -115,12 +131,15 @@ function createKeyboardEvent(key, options = {}) {
   };
 }
 
-function createPointerEvent(target) {
+function createPointerEvent(target, options = {}) {
   return {
     type: 'pointerdown',
     target,
+    isPrimary: true,
+    button: 0,
     defaultPrevented: false,
     preventDefaultCalls: 0,
+    ...options,
     preventDefault() {
       this.defaultPrevented = true;
       this.preventDefaultCalls += 1;
@@ -223,6 +242,32 @@ test('空格和 P 切换暂停、R 重开、Enter 开始且只拦截已识别键
   });
 });
 
+test('交互控件及其后代上的空格和 Enter 保留原生激活行为', () => {
+  const { documentObject, calls } = createHarness();
+  const anchor = new FakeElement({ tagName: 'a', href: '/lesson' });
+  const roleLink = new FakeElement({ role: 'link' });
+  const interactiveTargets = [
+    new FakeElement({ tagName: 'button' }),
+    new FakeElement({ parent: anchor }),
+    new FakeElement({ tagName: 'summary' }),
+    new FakeElement({ role: 'button' }),
+    new FakeElement({ parent: roleLink }),
+  ];
+
+  for (const target of interactiveTargets) {
+    for (const key of [' ', 'Enter']) {
+      const event = documentObject.dispatch(
+        createKeyboardEvent(key, { target }),
+      );
+      assert.equal(event.defaultPrevented, false);
+      assert.equal(event.preventDefaultCalls, 0);
+    }
+  }
+
+  assert.equal(calls.pauses, 0);
+  assert.equal(calls.starts, 0);
+});
+
 test('编辑控件、可编辑区域及其后代不触发快捷键', () => {
   const { documentObject, calls } = createHarness();
   const editableParent = new FakeElement({ contenteditable: 'true' });
@@ -282,7 +327,7 @@ test('输入法合成及 Ctrl、Meta、Alt 组合键不触发动作', () => {
   assert.equal(calls.starts, 0);
 });
 
-test('方向键允许持续触发而暂停、重开和开始忽略重复事件', () => {
+test('方向键允许重复回调且重复动作键只拦截默认行为', () => {
   const { documentObject, calls } = createHarness();
   const directionEvent = documentObject.dispatch(
     createKeyboardEvent('ArrowLeft', { repeat: true }),
@@ -295,7 +340,8 @@ test('方向键允许持续触发而暂停、重开和开始忽略重复事件',
     const event = documentObject.dispatch(
       createKeyboardEvent(key, { repeat: true }),
     );
-    assert.equal(event.defaultPrevented, false, `${key} 重复时不应被处理`);
+    assert.equal(event.defaultPrevented, true, `${key} 重复时应阻止默认行为`);
+    assert.equal(event.preventDefaultCalls, 1);
   }
 
   assert.equal(calls.pauses, 0);
@@ -322,6 +368,17 @@ test('触控委托只处理根节点内带合法方向的数据元素', () => {
 
   assert.equal(delegatedEvent.defaultPrevented, true);
   assert.equal(directEvent.defaultPrevented, true);
+  assert.deepEqual(calls.directions, ['left', 'down']);
+
+  const nonPrimaryEvent = touchRoot.dispatch(
+    createPointerEvent(directButton, { isPrimary: false }),
+  );
+  const nonLeftButtonEvent = touchRoot.dispatch(
+    createPointerEvent(directButton, { button: 2 }),
+  );
+
+  assert.equal(nonPrimaryEvent.defaultPrevented, false);
+  assert.equal(nonLeftButtonEvent.defaultPrevented, false);
   assert.deepEqual(calls.directions, ['left', 'down']);
 
   const outsideRoot = new FakeElement();

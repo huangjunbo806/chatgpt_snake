@@ -1,5 +1,7 @@
 const EDITABLE_SELECTOR =
   'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+const INTERACTIVE_SELECTOR =
+  'button, a[href], summary, [role="button"], [role="link"]';
 
 const DIRECTION_BY_KEY = Object.freeze({
   ArrowUp: 'up',
@@ -36,6 +38,22 @@ function isEditableTarget(target) {
   );
 }
 
+function isInteractiveTarget(target) {
+  if (!target) return false;
+
+  if (
+    typeof target.matches === 'function' &&
+    target.matches(INTERACTIVE_SELECTOR)
+  ) {
+    return true;
+  }
+
+  return (
+    typeof target.closest === 'function' &&
+    Boolean(target.closest(INTERACTIVE_SELECTOR))
+  );
+}
+
 export function createInputController(
   {
     documentObject = globalThis.document,
@@ -66,6 +84,13 @@ export function createInputController(
     }
 
     const key = normalizeKey(event.key);
+    if (
+      (key === ' ' || key === 'Enter') &&
+      isInteractiveTarget(event.target)
+    ) {
+      return;
+    }
+
     const direction = Object.hasOwn(DIRECTION_BY_KEY, key)
       ? DIRECTION_BY_KEY[key]
       : undefined;
@@ -76,21 +101,21 @@ export function createInputController(
       return;
     }
 
-    if (event.repeat) return;
-
     if (key === ' ' || key === 'p') {
       event.preventDefault();
-      onTogglePause();
+      if (!event.repeat) onTogglePause();
     } else if (key === 'r') {
       event.preventDefault();
-      onRestart();
+      if (!event.repeat) onRestart();
     } else if (key === 'Enter') {
       event.preventDefault();
-      onStart();
+      if (!event.repeat) onStart();
     }
   }
 
   function handlePointerDown(event) {
+    if (event.isPrimary === false) return;
+    if (typeof event.button === 'number' && event.button !== 0) return;
     if (typeof event.target?.closest !== 'function') return;
 
     const directionElement = event.target.closest('[data-direction]');
