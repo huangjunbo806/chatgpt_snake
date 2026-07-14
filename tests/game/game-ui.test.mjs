@@ -52,7 +52,23 @@ function createScheduler() {
     return true;
   }
 
-  return { active, created, cleared, setTimer, clearTimer, currentId, trigger };
+  function triggerQueued(id) {
+    const timer = created.find((candidate) => candidate.id === id);
+    if (!timer) return false;
+    timer.callback();
+    return true;
+  }
+
+  return {
+    active,
+    created,
+    cleared,
+    setTimer,
+    clearTimer,
+    currentId,
+    trigger,
+    triggerQueued,
+  };
 }
 
 function createHarness({
@@ -111,6 +127,17 @@ function advanceToWall(controller, scheduler) {
 
 function flushAsyncWork() {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, resolve, reject };
 }
 
 describe('初始化与运行循环', () => {
@@ -182,6 +209,8 @@ describe('初始化与运行循环', () => {
     assert.equal(elements.pauseButton.disabled, false);
     assert.equal(elements.pauseButton.textContent, '继续');
     assert.match(elements.status.textContent, /暂停/);
+    assert.equal(scheduler.triggerQueued(firstTimerId), true);
+    assert.strictEqual(controller.getState().snake, snakeBeforePause);
 
     controller.togglePause();
 
@@ -226,6 +255,60 @@ describe('结束上报与重试', () => {
       outcome: 'wall',
     });
     assert.equal(Object.isFrozen(callbackResults[0]), true);
+  });
+
+  test('得分后时钟回拨仍按最短移动间隔生成合法时长', async () => {
+    const callbackResults = [];
+    const times = [1_000, 900];
+    const randomValues = [206.5 / 396, 0];
+    const { controller, scheduler } = createHarness({
+      now: () => times.shift(),
+      random: () => randomValues.shift() ?? 0,
+      onGameFinished(result) {
+        callbackResults.push(result);
+      },
+    });
+
+    advanceToWall(controller, scheduler);
+    await flushAsyncWork();
+
+    assert.equal(callbackResults[0].score, 10);
+    assert.equal(callbackResults[0].durationMs, 70);
+  });
+
+  test('超过二十四小时的游戏时长会裁为服务端上限', async () => {
+    const callbackResults = [];
+    const times = [0, 86_405_000.8];
+    const { controller, scheduler } = createHarness({
+      now: () => times.shift(),
+      onGameFinished(result) {
+        callbackResults.push(result);
+      },
+    });
+
+    advanceToWall(controller, scheduler);
+    await flushAsyncWork();
+
+    assert.equal(callbackResults[0].durationMs, 86_400_000);
+  });
+
+  test('非有限时钟值会回退到有限整数最短时长', async () => {
+    const callbackResults = [];
+    const times = [Number.NaN, Number.POSITIVE_INFINITY];
+    const randomValues = [206.5 / 396, 0];
+    const { controller, scheduler } = createHarness({
+      now: () => times.shift(),
+      random: () => randomValues.shift() ?? 0,
+      onGameFinished(result) {
+        callbackResults.push(result);
+      },
+    });
+
+    advanceToWall(controller, scheduler);
+    await flushAsyncWork();
+
+    assert.equal(callbackResults[0].durationMs, 70);
+    assert.equal(Number.isInteger(callbackResults[0].durationMs), true);
   });
 
   test('上报失败显示重试，重试成功恢复结束文案且重开清除结果', async () => {
@@ -298,6 +381,7 @@ describe('结束上报与重试', () => {
       assert.equal(submittedResults.length, 2);
       assert.equal(elements.retryButton.hidden, false);
       assert.equal(elements.retryButton.disabled, true);
+      assert.equal(elements.status.textContent, '成绩正在提交，请稍候。');
     } finally {
       finishRetry();
     }
@@ -307,6 +391,66 @@ describe('结束上报与重试', () => {
     assert.equal(elements.retryButton.hidden, true);
     assert.equal(elements.retryButton.disabled, true);
     assert.match(elements.status.textContent, /撞墙/);
+  });
+
+  test('旧局成功乱序完成不会覆盖新局的上报失败状态', async () => {
+    const firstSubmission = createDeferred();
+    const submittedResults = [];
+    const { controller, elements, scheduler } = createHarness({
+      onGameFinished(result) {
+        submittedResults.push(result);
+        if (submittedResults.length === 1) return firstSubmission.promise;
+        throw new Error('第二局提交失败');
+      },
+    });
+
+    advanceToWall(controller, scheduler);
+    await Promise.resolve();
+    assert.equal(submittedResults.length, 1);
+
+    controller.restart();
+    advanceToWall(controller, scheduler);
+    await flushAsyncWork();
+
+    assert.equal(submittedResults.length, 2);
+    assert.notStrictEqual(submittedResults[1], submittedResults[0]);
+    assert.equal(elements.retryButton.hidden, false);
+    assert.equal(elements.retryButton.disabled, false);
+    assert.equal(
+      elements.status.textContent,
+      '成绩暂未保存，可点击‘重试提交成绩’。',
+    );
+
+    firstSubmission.resolve();
+    await flushAsyncWork();
+
+    assert.equal(elements.retryButton.hidden, false);
+    assert.equal(elements.retryButton.disabled, false);
+    assert.equal(
+      elements.status.textContent,
+      '成绩暂未保存，可点击‘重试提交成绩’。',
+    );
+  });
+
+  test('destroy 后未决上报拒绝不会回写僵尸重试状态', async () => {
+    const submission = createDeferred();
+    const { controller, elements, scheduler } = createHarness({
+      onGameFinished() {
+        return submission.promise;
+      },
+    });
+
+    advanceToWall(controller, scheduler);
+    await Promise.resolve();
+    const statusAfterFinish = elements.status.textContent;
+
+    controller.destroy();
+    submission.reject(new Error('销毁后才失败'));
+    await flushAsyncWork();
+
+    assert.equal(elements.retryButton.hidden, true);
+    assert.equal(elements.retryButton.disabled, true);
+    assert.equal(elements.status.textContent, statusAfterFinish);
   });
 });
 
@@ -329,6 +473,8 @@ describe('重开、升级调度与销毁', () => {
     assert.notEqual(newTimerId, oldTimerId);
 
     assert.equal(scheduler.trigger(oldTimerId), false);
+    assert.deepEqual(controller.getState().snake[0], { x: 9, y: 10 });
+    assert.equal(scheduler.triggerQueued(oldTimerId), true);
     assert.deepEqual(controller.getState().snake[0], { x: 9, y: 10 });
     assert.equal(scheduler.trigger(newTimerId), true);
     assert.deepEqual(controller.getState().snake[0], { x: 10, y: 10 });
@@ -356,6 +502,10 @@ describe('重开、升级调度与销毁', () => {
     assert.deepEqual(scheduler.created.map(({ delay }) => delay), [140, 130]);
     assert.deepEqual(scheduler.cleared, [levelOneTimerId]);
     assert.equal(scheduler.active.size, 1);
+
+    const headAfterUpgrade = { ...controller.getState().snake[0] };
+    assert.equal(scheduler.triggerQueued(levelOneTimerId), true);
+    assert.deepEqual(controller.getState().snake[0], headAfterUpgrade);
   });
 
   test('destroy 幂等清理活动计时器且无结果重试立即完成', async () => {
@@ -373,5 +523,8 @@ describe('重开、升级调度与销毁', () => {
     assert.deepEqual(scheduler.cleared, [timerId]);
     assert.equal(scheduler.active.size, 0);
     assert.equal(scheduler.trigger(timerId), false);
+    const headAfterDestroy = { ...controller.getState().snake[0] };
+    assert.equal(scheduler.triggerQueued(timerId), true);
+    assert.deepEqual(controller.getState().snake[0], headAfterDestroy);
   });
 });

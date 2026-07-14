@@ -1,4 +1,6 @@
 import {
+  MIN_INTERVAL_MS,
+  SCORE_PER_FOOD,
   createInitialState,
   pauseGame,
   requestDirection,
@@ -16,6 +18,36 @@ const DIRECTION_TEXT = Object.freeze({
 });
 
 const RETRY_STATUS = '成绩暂未保存，可点击‘重试提交成绩’。';
+const SUBMITTING_STATUS = '成绩正在提交，请稍候。';
+const MAX_DURATION_MS = 86_400_000;
+
+function defaultNow() {
+  if (typeof globalThis.performance?.now === 'function') {
+    return globalThis.performance.now();
+  }
+
+  return Date.now();
+}
+
+function normalizedDurationMs(score, startedAtMs, finishedAtMs) {
+  const numericScore = Number(score);
+  const minimumDurationMs =
+    Number.isFinite(numericScore) && numericScore > 0
+      ? Math.min(
+          MAX_DURATION_MS,
+          Math.ceil((numericScore / SCORE_PER_FOOD) * MIN_INTERVAL_MS),
+        )
+      : 0;
+  const elapsedMs = Number(finishedAtMs) - Number(startedAtMs);
+  const roundedElapsedMs = Number.isFinite(elapsedMs)
+    ? Math.round(elapsedMs)
+    : minimumDurationMs;
+
+  return Math.min(
+    MAX_DURATION_MS,
+    Math.max(0, minimumDurationMs, roundedElapsedMs),
+  );
+}
 
 function naturalStatusText(state) {
   if (state.status === 'ready') {
@@ -51,7 +83,7 @@ export function createGameController({
   renderer,
   scoreStore,
   random = Math.random,
-  now = () => Date.now(),
+  now = defaultNow,
   setTimer = (callback, delay) => globalThis.setInterval(callback, delay),
   clearTimer = (id) => globalThis.clearInterval(id),
   onGameFinished = () => undefined,
@@ -74,9 +106,12 @@ export function createGameController({
     elements.currentScore.textContent = String(state.score);
     elements.bestScore.textContent = String(bestScore);
     elements.speedLevel.textContent = String(state.level);
-    elements.status.textContent = resultSubmissionFailed
-      ? RETRY_STATUS
-      : naturalStatusText(state);
+    elements.status.textContent =
+      resultSubmissionFailed && resultSubmissionPending
+        ? SUBMITTING_STATUS
+        : resultSubmissionFailed
+          ? RETRY_STATUS
+          : naturalStatusText(state);
     elements.startButton.disabled = !isReady;
     elements.pauseButton.disabled = !canPause;
     elements.pauseButton.textContent =
@@ -149,7 +184,7 @@ export function createGameController({
     bestScore = scoreStore.getBestScore();
     finishedResult = Object.freeze({
       score: state.score,
-      durationMs: Math.max(0, Math.round(now() - startedAtMs)),
+      durationMs: normalizedDurationMs(state.score, startedAtMs, now()),
       outcome: state.outcome,
     });
     resultSubmissionFailed = false;
