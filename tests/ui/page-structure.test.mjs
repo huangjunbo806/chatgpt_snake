@@ -8,6 +8,14 @@ async function readPage() {
   return readFile(pagePath, 'utf8');
 }
 
+function visibleText(html) {
+  return html
+    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function openingTagWithId(tagName, id) {
   return new RegExp(
     `<${tagName}\\b(?=[^>]*\\bid=["']${id}["'])[^>]*>`,
@@ -26,6 +34,25 @@ test('声明中文 HTML 文档并使用语义化页面区域', async () => {
   assert.match(html, /<footer\b[^>]*>/i);
   assert.match(html, /<h1\b[^>]*>[^<]*Docker Snake[^<]*<\/h1>/i);
   assert.match(html, /<noscript\b[^>]*>[\s\S]*?<\/noscript>/i);
+});
+
+test('保留 HTML 第一课的既有教学文案', async () => {
+  const html = await readPage();
+  const text = visibleText(html);
+  const expectedCopy = [
+    '用语义化 HTML 搭建终端游戏控制台',
+    '$ docker-snake --lesson html',
+    '游戏区域',
+    '游戏尚未开始。',
+    '排行榜将在后续课程接入。',
+  ];
+  const missingCopy = expectedCopy.filter((copy) => !text.includes(copy));
+
+  assert.deepEqual(
+    missingCopy,
+    [],
+    '缺少上一课既有文案：' + missingCopy.join('、'),
+  );
 });
 
 test('提供课程所需的全部页面结构挂载点', async () => {
