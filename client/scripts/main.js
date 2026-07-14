@@ -1,7 +1,11 @@
+import { createApiClient } from './api.js';
+import { createAuthController } from './auth.js';
 import { createCanvasRenderer } from './canvas-renderer.js';
 import { createGameController } from './game-ui.js';
 import { createGuestScoreStore } from './guest-score.js';
 import { createInputController } from './input-controller.js';
+import { createLeaderboardController } from './leaderboard.js';
+import { createScoreCoordinator } from './score-coordinator.js';
 
 const REQUIRED_ELEMENT_IDS = Object.freeze([
   'game-canvas',
@@ -24,6 +28,8 @@ export function initializeGameApp(
     createScoreStore = createGuestScoreStore,
     createController = createGameController,
     createInput = createInputController,
+    initialBestScore,
+    onRoundStarted,
     onGameFinished = () => undefined,
   } = {},
 ) {
@@ -44,22 +50,36 @@ export function initializeGameApp(
   }
 
   const renderer = createRenderer(requiredElements['game-canvas']);
-  const scoreStore = createScoreStore();
-  const controller = createController({
-    elements: {
-      currentScore: requiredElements['current-score'],
-      bestScore: requiredElements['best-score'],
-      speedLevel: requiredElements['speed-level'],
-      status: requiredElements['game-status'],
-      startButton: requiredElements['start-game'],
-      pauseButton: requiredElements['toggle-pause'],
-      restartButton: requiredElements['restart-game'],
-      retryButton: requiredElements['retry-score'],
-    },
-    renderer,
-    scoreStore,
-    onGameFinished,
-  });
+  const usesExternalScoreSource = initialBestScore !== undefined
+    || typeof onRoundStarted === 'function';
+  const controllerElements = {
+    currentScore: requiredElements['current-score'],
+    bestScore: requiredElements['best-score'],
+    speedLevel: requiredElements['speed-level'],
+    status: requiredElements['game-status'],
+    startButton: requiredElements['start-game'],
+    pauseButton: requiredElements['toggle-pause'],
+    restartButton: requiredElements['restart-game'],
+    retryButton: requiredElements['retry-score'],
+  };
+  let controllerOptions;
+  if (usesExternalScoreSource) {
+    controllerOptions = {
+      elements: controllerElements,
+      renderer,
+      initialBestScore: initialBestScore ?? 0,
+      onRoundStarted,
+      onGameFinished,
+    };
+  } else {
+    controllerOptions = {
+      elements: controllerElements,
+      renderer,
+      scoreStore: createScoreStore(),
+      onGameFinished,
+    };
+  }
+  const controller = createController(controllerOptions);
   const inputController = createInput({
     documentObject: documentRef,
     touchRoot: requiredElements['touch-controls'],
@@ -122,10 +142,125 @@ export function initializeGameApp(
   return Object.freeze({ controller, destroy });
 }
 
-if (globalThis.document) {
+const AUTH_ELEMENT_IDS = Object.freeze({
+  sessionStatus: 'session-status',
+  showRegisterButton: 'show-register',
+  showLoginButton: 'show-login',
+  logoutButton: 'logout-account',
+  panel: 'auth-panel',
+  title: 'auth-title',
+  form: 'auth-form',
+  usernameInput: 'auth-username',
+  passwordInput: 'auth-password',
+  confirmRow: 'confirm-row',
+  confirmPasswordInput: 'confirm-password',
+  help: 'auth-help',
+  message: 'auth-message',
+  submitButton: 'auth-submit',
+  cancelButton: 'auth-cancel',
+});
+
+const LEADERBOARD_ELEMENT_IDS = Object.freeze({
+  status: 'leaderboard-status',
+  list: 'leaderboard-list',
+  myRank: 'my-rank',
+  refreshButton: 'refresh-leaderboard',
+});
+
+function collectElements(documentRef, idMap) {
+  const elements = {};
+  for (const [key, id] of Object.entries(idMap)) {
+    const element = documentRef?.querySelector?.(`#${id}`);
+    if (!element) throw new Error(`找不到 #${id}，无法启动网页应用。`);
+    elements[key] = element;
+  }
+  return elements;
+}
+
+export async function initializeBrowserApp({
+  documentRef = globalThis.document,
+  windowRef = globalThis.window,
+  createApi = createApiClient,
+  createGuestStore = createGuestScoreStore,
+  createAuth = createAuthController,
+  createScoreSync = createScoreCoordinator,
+  createLeaderboard = createLeaderboardController,
+  initializeGame = initializeGameApp,
+} = {}) {
+  const authElements = collectElements(documentRef, AUTH_ELEMENT_IDS);
+  const leaderboardElements = collectElements(documentRef, LEADERBOARD_ELEMENT_IDS);
+  const api = createApi();
+  const guestScoreStore = createGuestStore();
+  const auth = createAuth({ api, elements: authElements });
+  let game = null;
+  let leaderboard = null;
+  let scoreSync = null;
+  let unsubscribe = () => undefined;
+
   try {
-    initializeGameApp();
+    await auth.initialize();
+    scoreSync = createScoreSync({
+      api,
+      guestScoreStore,
+      getAuthSnapshot: auth.getSnapshot,
+      onBestScore(score) {
+        game?.controller.setBestScore(score);
+      },
+      onScoreSubmitted() {
+        void leaderboard?.refresh();
+      },
+      onAuthenticationRequired() {
+        void auth.initialize();
+      },
+    });
+
+    const initialSnapshot = auth.getSnapshot();
+    const initialBestScore = initialSnapshot.status === 'guest'
+      ? guestScoreStore.getBestScore()
+      : 0;
+    game = initializeGame({
+      documentRef,
+      windowRef,
+      initialBestScore,
+      onRoundStarted: scoreSync.beginRound,
+      onGameFinished: scoreSync.finishRound,
+    });
+    leaderboard = createLeaderboard({
+      api,
+      elements: leaderboardElements,
+      documentRef,
+      getAuthSnapshot: auth.getSnapshot,
+      onServerBest: scoreSync.applyServerBest,
+    });
+    unsubscribe = auth.subscribe((snapshot) => {
+      scoreSync.handleAuthChange(snapshot);
+      leaderboard.handleAuthChange(snapshot);
+    });
   } catch (error) {
+    unsubscribe();
+    leaderboard?.destroy();
+    scoreSync?.destroy();
+    game?.destroy();
+    auth.destroy();
+    throw error;
+  }
+
+  let destroyed = false;
+  function destroy() {
+    if (destroyed) return;
+    destroyed = true;
+    unsubscribe();
+    leaderboard.destroy();
+    scoreSync.destroy();
+    game.destroy();
+    auth.destroy();
+  }
+
+  return Object.freeze({ auth, game, leaderboard, destroy });
+}
+
+if (globalThis.document) {
+  initializeBrowserApp().catch((error) => {
     const status = globalThis.document.querySelector?.('#game-status');
 
     if (status) {
@@ -134,5 +269,5 @@ if (globalThis.document) {
           ? error.message
           : '无法启动游戏，请刷新页面后重试。';
     }
-  }
+  });
 }

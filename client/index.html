@@ -7,7 +7,7 @@
       name="description"
       content="Docker Snake 全栈学习项目的终端霓虹响应式游戏界面"
     >
-    <title>Docker Snake | CSS 第二课</title>
+    <title>Docker Snake | 全栈学习版</title>
     <link rel="stylesheet" href="./styles/main.css">
     <script type="module" src="./scripts/main.js"></script>
   </head>
@@ -18,19 +18,66 @@
           <p class="eyebrow">用语义化 HTML 搭建终端游戏控制台</p>
           <h1>Docker Snake</h1>
           <p class="command-line" aria-label="当前课程命令">
-            <span aria-hidden="true">$</span> docker-snake --lesson html
+            <span aria-hidden="true">$</span> docker-snake --mode full-stack
           </p>
         </div>
 
         <div class="session-panel">
-          <p id="session-status">
+          <p id="session-status" aria-live="polite">
             <span class="online-indicator" aria-hidden="true"></span>
-            当前状态：访客
+            正在确认登录状态…
           </p>
           <nav id="auth-controls" aria-label="账户操作">
-            <button type="button">注册</button>
-            <button type="button">登录</button>
+            <button id="show-register" type="button" disabled>注册</button>
+            <button id="show-login" type="button" disabled>登录</button>
+            <button id="logout-account" type="button" hidden>退出登录</button>
           </nav>
+
+          <section
+            id="auth-panel"
+            class="auth-panel"
+            aria-labelledby="auth-title"
+            hidden
+          >
+            <h2 id="auth-title">登录账户</h2>
+            <form id="auth-form">
+              <label for="auth-username">用户名</label>
+              <input
+                id="auth-username"
+                name="username"
+                type="text"
+                autocomplete="username"
+                spellcheck="false"
+                required
+              >
+
+              <label for="auth-password">密码</label>
+              <input
+                id="auth-password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                required
+              >
+
+              <div id="confirm-row" class="auth-field" hidden>
+                <label for="confirm-password">确认密码</label>
+                <input
+                  id="confirm-password"
+                  name="confirmPassword"
+                  type="password"
+                  autocomplete="new-password"
+                >
+              </div>
+
+              <p id="auth-help" class="auth-help"></p>
+              <p id="auth-message" class="auth-message" aria-live="polite"></p>
+              <div class="auth-actions">
+                <button id="auth-submit" type="submit">登录</button>
+                <button id="auth-cancel" type="button">取消</button>
+              </div>
+            </form>
+          </section>
         </div>
       </header>
 
@@ -76,12 +123,12 @@
           </div>
 
           <div class="game-actions" aria-label="游戏操作">
-            <button id="start-game" type="button">开始游戏</button>
+            <button id="start-game" type="button" disabled>开始游戏</button>
             <button id="toggle-pause" type="button" disabled>
               暂停 / 继续
             </button>
             <button id="restart-game" type="button" disabled>重新开始</button>
-            <button id="retry-score" type="button" disabled>
+            <button id="retry-score" type="button" disabled hidden>
               重试提交成绩
             </button>
           </div>
@@ -144,9 +191,14 @@
               <p class="eyebrow">Casual Ranking</p>
               <h2 id="leaderboard-heading">休闲排行榜</h2>
             </div>
-            <p id="leaderboard-status" aria-live="polite">
-              排行榜将在后续课程接入。
-            </p>
+            <div class="leaderboard-actions">
+              <p id="leaderboard-status" aria-live="polite">
+                等待确认登录状态…
+              </p>
+              <button id="refresh-leaderboard" type="button" disabled>
+                刷新排行榜
+              </button>
+            </div>
           </header>
           <ol id="leaderboard-list">
             <li>暂无已提交成绩</li>
@@ -156,13 +208,13 @@
       </main>
 
       <footer class="site-footer">
-        <p>Docker Snake · CSS 第二课：终端霓虹响应式界面</p>
+        <p>Docker Snake · HTML、JavaScript、Node.js 与 PostgreSQL 学习项目</p>
       </footer>
     </div>
 
     <noscript>
       <p class="noscript-message">
-        此页面需要启用 JavaScript 才能在后续课程中运行游戏。
+        此页面需要启用 JavaScript 才能运行游戏、登录和查看排行榜。
       </p>
     </noscript>
   </body>

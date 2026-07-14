@@ -74,6 +74,7 @@ function createScheduler() {
 function createHarness({
   bestScore = 90,
   now = () => 0,
+  onRoundStarted = () => Object.freeze({ kind: 'guest' }),
   onGameFinished = () => undefined,
   random = () => 0,
 } = {}) {
@@ -105,6 +106,7 @@ function createHarness({
     now,
     setTimer: scheduler.setTimer,
     clearTimer: scheduler.clearTimer,
+    onRoundStarted,
     onGameFinished,
   });
 
@@ -152,6 +154,7 @@ describe('初始化与运行循环', () => {
       'restart',
       'turn',
       'retryResult',
+      'setBestScore',
       'destroy',
       'getState',
     ]);
@@ -169,6 +172,19 @@ describe('初始化与运行循环', () => {
     assert.equal(elements.retryButton.hidden, true);
     assert.equal(elements.retryButton.disabled, true);
     assert.equal(scheduler.active.size, 0);
+  });
+
+  test('外部最高分切换可以升高也可以降低', () => {
+    const { controller, elements } = createHarness({ bestScore: 90 });
+
+    controller.setBestScore(240);
+    assert.equal(elements.bestScore.textContent, '240');
+
+    controller.setBestScore(0);
+    assert.equal(elements.bestScore.textContent, '0');
+
+    controller.setBestScore(-10);
+    assert.equal(elements.bestScore.textContent, '0');
   });
 
   test('开始后按 140 毫秒调度且 tick 使用真实引擎移动', () => {
@@ -225,6 +241,35 @@ describe('初始化与运行循环', () => {
 });
 
 describe('结束上报与重试', () => {
+  test('每局开始时冻结归属，失败重试复用同一结果和归属', async () => {
+    const owners = [];
+    const submissions = [];
+    const { controller, scheduler } = createHarness({
+      onRoundStarted() {
+        const owner = Object.freeze({ kind: 'user', userId: String(owners.length + 1) });
+        owners.push(owner);
+        return owner;
+      },
+      onGameFinished(result, owner) {
+        submissions.push({ result, owner });
+        if (submissions.length === 1) throw new Error('首次失败');
+      },
+    });
+
+    advanceToWall(controller, scheduler);
+    await flushAsyncWork();
+    await controller.retryResult();
+
+    assert.equal(owners.length, 1);
+    assert.equal(Object.isFrozen(owners[0]), true);
+    assert.strictEqual(submissions[1].result, submissions[0].result);
+    assert.strictEqual(submissions[1].owner, submissions[0].owner);
+
+    controller.restart();
+    assert.equal(owners.length, 2);
+    assert.notStrictEqual(owners[1], owners[0]);
+  });
+
   test('撞墙后停止计时、记录成绩并异步上报冻结结果', async () => {
     const callbackResults = [];
     const times = [1_000, 1_534.4];

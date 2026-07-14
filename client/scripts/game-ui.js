@@ -82,18 +82,24 @@ export function createGameController({
   elements,
   renderer,
   scoreStore,
+  initialBestScore,
   random = Math.random,
   now = defaultNow,
   setTimer = (callback, delay) => globalThis.setInterval(callback, delay),
   clearTimer = (id) => globalThis.clearInterval(id),
+  onRoundStarted = () => Object.freeze({ kind: 'guest' }),
   onGameFinished = () => undefined,
 }) {
   let state = createInitialState(random);
-  let bestScore = scoreStore.getBestScore();
+  let bestScore = Number.isInteger(initialBestScore) && initialBestScore >= 0
+    ? initialBestScore
+    : scoreStore?.getBestScore?.() ?? 0;
   let activeTimerId = null;
   let timerGeneration = 0;
   let startedAtMs = null;
+  let activeRoundOwner = null;
   let finishedResult = null;
+  let finishedRoundOwner = null;
   let resultSubmissionFailed = false;
   let resultSubmissionPending = false;
   let submissionPromise = null;
@@ -152,12 +158,12 @@ export function createGameController({
     }, state.intervalMs);
   }
 
-  function submitResult(result) {
+  function submitResult(result, roundOwner) {
     if (!result) return Promise.resolve();
 
     resultSubmissionPending = true;
     submissionPromise = Promise.resolve()
-      .then(() => onGameFinished(result))
+      .then(() => onGameFinished(result, roundOwner))
       .then(
         () => {
           if (destroyed || finishedResult !== result) return;
@@ -180,18 +186,21 @@ export function createGameController({
 
   function finishGame() {
     stopTimer();
-    scoreStore.recordScore(state.score);
-    bestScore = scoreStore.getBestScore();
+    if (scoreStore?.recordScore && scoreStore?.getBestScore) {
+      scoreStore.recordScore(state.score);
+      bestScore = scoreStore.getBestScore();
+    }
     finishedResult = Object.freeze({
       score: state.score,
       durationMs: normalizedDurationMs(state.score, startedAtMs, now()),
       outcome: state.outcome,
     });
+    finishedRoundOwner = activeRoundOwner;
     resultSubmissionFailed = false;
     resultSubmissionPending = false;
     submissionPromise = null;
     renderView();
-    void submitResult(finishedResult);
+    void submitResult(finishedResult, finishedRoundOwner);
   }
 
   function tick() {
@@ -216,6 +225,7 @@ export function createGameController({
   function start() {
     if (destroyed || state.status !== 'ready') return;
 
+    activeRoundOwner = onRoundStarted();
     state = startGame(state);
     startedAtMs = now();
     scheduleTimer();
@@ -243,9 +253,11 @@ export function createGameController({
     if (destroyed) return;
 
     stopTimer();
+    activeRoundOwner = onRoundStarted();
     state = startGame(restartGame(random));
     startedAtMs = now();
     finishedResult = null;
+    finishedRoundOwner = null;
     resultSubmissionFailed = false;
     resultSubmissionPending = false;
     submissionPromise = null;
@@ -267,7 +279,13 @@ export function createGameController({
     if (!finishedResult) return Promise.resolve();
     if (resultSubmissionPending) return submissionPromise;
     if (!resultSubmissionFailed) return Promise.resolve();
-    return submitResult(finishedResult);
+    return submitResult(finishedResult, finishedRoundOwner);
+  }
+
+  function setBestScore(score) {
+    if (destroyed || !Number.isInteger(score) || score < 0) return;
+    bestScore = score;
+    updateElements();
   }
 
   function destroy() {
@@ -275,6 +293,8 @@ export function createGameController({
 
     destroyed = true;
     finishedResult = null;
+    finishedRoundOwner = null;
+    activeRoundOwner = null;
     resultSubmissionFailed = false;
     resultSubmissionPending = false;
     submissionPromise = null;
@@ -293,6 +313,7 @@ export function createGameController({
     restart,
     turn,
     retryResult,
+    setBestScore,
     destroy,
     getState,
   });

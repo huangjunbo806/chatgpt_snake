@@ -36,15 +36,15 @@ test('声明中文 HTML 文档并使用语义化页面区域', async () => {
   assert.match(html, /<noscript\b[^>]*>[\s\S]*?<\/noscript>/i);
 });
 
-test('保留 HTML 第一课的既有教学文案', async () => {
+test('保留学习项目名称并显示全栈运行状态文案', async () => {
   const html = await readPage();
   const text = visibleText(html);
   const expectedCopy = [
     '用语义化 HTML 搭建终端游戏控制台',
-    '$ docker-snake --lesson html',
+    '$ docker-snake --mode full-stack',
     '游戏区域',
     '游戏尚未开始。',
-    '排行榜将在后续课程接入。',
+    '等待确认登录状态…',
   ];
   const missingCopy = expectedCopy.filter((copy) => !text.includes(copy));
 
@@ -60,6 +60,15 @@ test('提供课程所需的全部页面结构挂载点', async () => {
   const requiredIds = [
     'session-status',
     'auth-controls',
+    'show-register',
+    'show-login',
+    'logout-account',
+    'auth-panel',
+    'auth-form',
+    'auth-username',
+    'auth-password',
+    'confirm-password',
+    'auth-message',
     'current-score',
     'best-score',
     'speed-level',
@@ -74,6 +83,7 @@ test('提供课程所需的全部页面结构挂载点', async () => {
     'leaderboard-status',
     'leaderboard-list',
     'my-rank',
+    'refresh-leaderboard',
   ];
 
   for (const id of requiredIds) {
@@ -106,6 +116,21 @@ test('游戏区域公开文字状态、画布回退和基础控制', async () =>
   ]) {
     assert.match(html, openingTagWithId('button', id));
   }
+  assert.match(
+    html,
+    /<button\b(?=[^>]*\bid=["']start-game["'])(?=[^>]*\bdisabled\b)[^>]*>/i,
+  );
+});
+
+test('认证表单提供标签、自动填充和无障碍状态区', async () => {
+  const html = await readPage();
+
+  assert.match(html, /<form\b[^>]*\bid=["']auth-form["'][^>]*>/i);
+  assert.match(html, /<label\b[^>]*\bfor=["']auth-username["'][^>]*>/i);
+  assert.match(html, /<input\b(?=[^>]*\bid=["']auth-username["'])(?=[^>]*\bautocomplete=["']username["'])[^>]*>/i);
+  assert.match(html, /<input\b(?=[^>]*\bid=["']auth-password["'])(?=[^>]*\btype=["']password["'])[^>]*>/i);
+  assert.match(html, /<[^>]+(?=[^>]*\bid=["']auth-message["'])(?=[^>]*\baria-live=["']polite["'])[^>]*>/i);
+  assert.doesNotMatch(html, /<input\b[^>]*\bid=["']auth-password["'][^>]*\bmaxlength=/i);
 });
 
 test('触控区恰好提供四个方向按钮', async () => {

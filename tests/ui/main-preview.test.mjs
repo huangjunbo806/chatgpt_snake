@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { initializeGameApp } from '../../client/scripts/main.js';
+import {
+  initializeBrowserApp,
+  initializeGameApp,
+} from '../../client/scripts/main.js';
 
 const REQUIRED_IDS = Object.freeze([
   'game-canvas',
@@ -664,4 +667,99 @@ test('默认真实模块可开始、转向、页面隐藏暂停并完整清理',
       delete globalThis.localStorage;
     }
   }
+});
+
+test('浏览器总装配先确认认证，再连接成绩归属、游戏和排行榜', async () => {
+  const browserIds = [
+    'session-status', 'show-register', 'show-login', 'logout-account',
+    'auth-panel', 'auth-title', 'auth-form', 'auth-username', 'auth-password',
+    'confirm-row', 'confirm-password', 'auth-help', 'auth-message',
+    'auth-submit', 'auth-cancel', 'leaderboard-status', 'leaderboard-list',
+    'my-rank', 'refresh-leaderboard',
+  ];
+  const elements = new Map(browserIds.map((id) => [id, new FakeElement({ id })]));
+  const documentRef = new FakeDocument(elements);
+  documentRef.createElement = (tagName) => new FakeElement({ tagName });
+  const order = [];
+  const api = {};
+  const guestStore = { getBestScore: () => 70 };
+  let subscriber;
+  let unsubscribed = 0;
+  let gameDestroyed = 0;
+  let scoreDestroyed = 0;
+  let leaderboardDestroyed = 0;
+  let authDestroyed = 0;
+  const snapshot = { status: 'guest', user: null };
+  const auth = {
+    async initialize() { order.push('auth.initialize'); },
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      order.push('auth.subscribe');
+      subscriber = listener;
+      listener(snapshot);
+      return () => { unsubscribed += 1; };
+    },
+    destroy() { authDestroyed += 1; },
+  };
+  const scoreSync = {
+    beginRound() {}, finishRound() {}, applyServerBest() {},
+    handleAuthChange(received) {
+      assert.strictEqual(received, snapshot);
+      order.push('score.auth');
+    },
+    destroy() { scoreDestroyed += 1; },
+  };
+  const game = {
+    controller: { setBestScore() {} },
+    destroy() { gameDestroyed += 1; },
+  };
+  const leaderboard = {
+    refresh() {},
+    handleAuthChange(received) {
+      assert.strictEqual(received, snapshot);
+      order.push('leaderboard.auth');
+    },
+    destroy() { leaderboardDestroyed += 1; },
+  };
+
+  const app = await initializeBrowserApp({
+    documentRef,
+    windowRef: {},
+    createApi() { order.push('api'); return api; },
+    createGuestStore() { order.push('guest'); return guestStore; },
+    createAuth(options) {
+      order.push('auth');
+      assert.strictEqual(options.api, api);
+      return auth;
+    },
+    createScoreSync(options) {
+      order.push('score');
+      assert.strictEqual(options.guestScoreStore, guestStore);
+      return scoreSync;
+    },
+    initializeGame(options) {
+      order.push('game');
+      assert.equal(options.initialBestScore, 70);
+      assert.strictEqual(options.onRoundStarted, scoreSync.beginRound);
+      return game;
+    },
+    createLeaderboard(options) {
+      order.push('leaderboard');
+      assert.strictEqual(options.onServerBest, scoreSync.applyServerBest);
+      return leaderboard;
+    },
+  });
+
+  assert.deepEqual(order, [
+    'api', 'guest', 'auth', 'auth.initialize', 'score', 'game',
+    'leaderboard', 'auth.subscribe', 'score.auth', 'leaderboard.auth',
+  ]);
+  assert.equal(typeof subscriber, 'function');
+  assert.equal(Object.isFrozen(app), true);
+  app.destroy();
+  app.destroy();
+  assert.deepEqual(
+    { unsubscribed, leaderboardDestroyed, scoreDestroyed, gameDestroyed, authDestroyed },
+    { unsubscribed: 1, leaderboardDestroyed: 1, scoreDestroyed: 1, gameDestroyed: 1, authDestroyed: 1 },
+  );
 });
