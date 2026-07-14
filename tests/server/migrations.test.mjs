@@ -52,12 +52,18 @@ function createLogger() {
   };
 }
 
-function createRecordingPool({ appliedMigrations = [], failOnSql, failOnRollback = false } = {}) {
+function createRecordingPool({
+  appliedMigrations = [],
+  failOnSql,
+  failOnRollback = false,
+  failOnRelease = false,
+} = {}) {
   let ledger = new Map(appliedMigrations.map(({ version, checksum }) => [version, checksum]));
   let transactionLedger = null;
   const calls = [];
   const releaseArguments = [];
   const rollbackError = new Error('rollback-connection-secret');
+  const releaseError = new Error('release-connection-secret');
   let releases = 0;
   let connectCalls = 0;
 
@@ -112,6 +118,9 @@ function createRecordingPool({ appliedMigrations = [], failOnSql, failOnRollback
     release(error) {
       releases += 1;
       releaseArguments.push(error);
+      if (failOnRelease) {
+        throw releaseError;
+      }
     },
   };
 
@@ -130,6 +139,7 @@ function createRecordingPool({ appliedMigrations = [], failOnSql, failOnRollback
       return ledger;
     },
     releaseArguments,
+    releaseError,
     rollbackError,
     get releases() {
       return releases;
@@ -223,20 +233,21 @@ describe('loadMigrations', () => {
 
 describe('runMigrations', () => {
   test('在同一 client 的事务与 advisory lock 内按版本执行未应用迁移', async () => {
+    const firstSql = "SELECT 'first-body';";
     const secondSql = "SELECT 'second-body';";
     const recorder = createRecordingPool({
-      appliedMigrations: [{ version: '002-second.sql', checksum: sha256(secondSql) }],
+      appliedMigrations: [{ version: '001-first.sql', checksum: sha256(firstSql) }],
     });
     const logger = createLogger();
     const migrations = [
       { version: '003-third.sql', sql: "SELECT 'third-body';" },
-      { version: '001-first.sql', sql: "SELECT 'first-body';" },
+      { version: '001-first.sql', sql: firstSql },
       { version: '002-second.sql', sql: secondSql },
     ];
 
     const applied = await runMigrations({ pool: recorder.pool, migrations, logger });
 
-    assert.deepEqual(applied, ['001-first.sql', '003-third.sql']);
+    assert.deepEqual(applied, ['002-second.sql', '003-third.sql']);
     assert.equal(recorder.connectCalls, 1);
     assert.equal(recorder.releases, 1);
 
@@ -254,11 +265,11 @@ describe('runMigrations', () => {
     assert.match(statements[4], /^ALTER TABLE public\.schema_migrations ADD COLUMN IF NOT EXISTS checksum char\(64\)$/iu);
     assert.match(statements[5], /^SELECT version, checksum FROM public\.schema_migrations/iu);
     assert.match(statements[6], /^ALTER TABLE public\.schema_migrations ALTER COLUMN checksum SET NOT NULL$/iu);
-    assert.equal(statements[7], "SELECT 'first-body';");
+    assert.equal(statements[7], secondSql);
     assert.match(statements[8], /^INSERT INTO public\.schema_migrations\s*\(version, checksum\)\s*VALUES\s*\(\$1, \$2\)$/iu);
     assert.deepEqual(recorder.calls[8].values, [
-      '001-first.sql',
-      sha256("SELECT 'first-body';"),
+      '002-second.sql',
+      sha256(secondSql),
     ]);
     assert.equal(statements[9], "SELECT 'third-body';");
     assert.deepEqual(recorder.calls[10].values, [
@@ -266,14 +277,14 @@ describe('runMigrations', () => {
       sha256("SELECT 'third-body';"),
     ]);
     assert.equal(statements[11], 'COMMIT');
-    assert.equal(statements.includes("SELECT 'second-body';"), false);
+    assert.equal(statements.includes(firstSql), false);
     assert.deepEqual([...recorder.ledger].sort(), [
-      ['001-first.sql', sha256("SELECT 'first-body';")],
+      ['001-first.sql', sha256(firstSql)],
       ['002-second.sql', sha256(secondSql)],
       ['003-third.sql', sha256("SELECT 'third-body';")],
     ]);
     assert.deepEqual(logger.entries, [
-      [{ event: 'database_migration_applied', version: '001-first.sql' }],
+      [{ event: 'database_migration_applied', version: '002-second.sql' }],
       [{ event: 'database_migration_applied', version: '003-third.sql' }],
     ]);
   });
@@ -393,6 +404,134 @@ describe('runMigrations', () => {
     assert.equal(statements.at(-1), 'ROLLBACK');
   });
 
+  test('旧镜像允许完整本地前缀之后存在带 checksum 的未来迁移', async () => {
+    const localSql = "SELECT 'local-applied';";
+    const futureSql = "SELECT 'future-applied';";
+    const recorder = createRecordingPool({
+      appliedMigrations: [
+        { version: '001-local.sql', checksum: sha256(localSql) },
+        { version: '002-future.sql', checksum: sha256(futureSql) },
+      ],
+    });
+
+    const applied = await runMigrations({
+      pool: recorder.pool,
+      migrations: [{ version: '001-local.sql', sql: localSql }],
+      logger: createLogger(),
+    });
+
+    assert.deepEqual(applied, []);
+    const statements = recorder.calls.map(({ text }) => compactSql(text));
+    assert.equal(statements.includes(localSql), false);
+    assert.equal(statements.includes(futureSql), false);
+    assert.equal(statements.at(-1), 'COMMIT');
+    assert.deepEqual([...recorder.ledger], [
+      ['001-local.sql', sha256(localSql)],
+      ['002-future.sql', sha256(futureSql)],
+    ]);
+  });
+
+  test('未来迁移没有 checksum 时受控拒绝且不尝试回填', async () => {
+    const localSql = "SELECT 'local-applied';";
+    const recorder = createRecordingPool({
+      appliedMigrations: [
+        { version: '001-local.sql', checksum: sha256(localSql) },
+        { version: '002-future.sql', checksum: null },
+      ],
+    });
+
+    await assert.rejects(
+      runMigrations({
+        pool: recorder.pool,
+        migrations: [{ version: '001-local.sql', sql: localSql }],
+        logger: createLogger(),
+      }),
+      /旧版未来迁移记录缺少 checksum/u,
+    );
+
+    const statements = recorder.calls.map(({ text }) => compactSql(text));
+    assert.equal(statements.some((sql) => /^UPDATE public\.schema_migrations/iu.test(sql)), false);
+    assert.equal(statements.includes(localSql), false);
+    assert.equal(statements.at(-1), 'ROLLBACK');
+  });
+
+  test('拒绝已应用本地迁移不构成连续前缀', async (t) => {
+    const migrations = [
+      { version: '001-first.sql', sql: "SELECT 'first';" },
+      { version: '002-second.sql', sql: "SELECT 'second';" },
+      { version: '003-third.sql', sql: "SELECT 'third';" },
+    ];
+
+    for (const { name, appliedMigrations } of [
+      {
+        name: '中间缺洞',
+        appliedMigrations: [migrations[0], migrations[2]].map(({ version, sql }) => ({
+          version,
+          checksum: sha256(sql),
+        })),
+      },
+      {
+        name: '只记录后置版本',
+        appliedMigrations: [{
+          version: migrations[1].version,
+          checksum: sha256(migrations[1].sql),
+        }],
+      },
+      {
+        name: '后置旧记录也不得先回填',
+        appliedMigrations: [{
+          version: migrations[1].version,
+          checksum: null,
+        }],
+      },
+    ]) {
+      await t.test(name, async () => {
+        const recorder = createRecordingPool({ appliedMigrations });
+
+        await assert.rejects(
+          runMigrations({ pool: recorder.pool, migrations, logger: createLogger() }),
+          /已应用迁移必须构成本地迁移的连续前缀/u,
+        );
+
+        const statements = recorder.calls.map(({ text }) => compactSql(text));
+        assert.equal(migrations.some(({ sql }) => statements.includes(sql)), false);
+        assert.equal(
+          statements.some((sql) => /^UPDATE public\.schema_migrations/iu.test(sql)),
+          false,
+        );
+        assert.equal(statements.at(-1), 'ROLLBACK');
+      });
+    }
+  });
+
+  test('ledger 含未来版本时本地不得仍有待应用迁移', async () => {
+    const firstSql = "SELECT 'first';";
+    const futureSql = "SELECT 'future';";
+    const recorder = createRecordingPool({
+      appliedMigrations: [
+        { version: '001-first.sql', checksum: sha256(firstSql) },
+        { version: '003-future.sql', checksum: sha256(futureSql) },
+      ],
+    });
+
+    await assert.rejects(
+      runMigrations({
+        pool: recorder.pool,
+        migrations: [
+          { version: '001-first.sql', sql: firstSql },
+          { version: '002-pending.sql', sql: "SELECT 'must-not-run';" },
+        ],
+        logger: createLogger(),
+      }),
+      /存在未来迁移记录时.*本地迁移必须全部已应用/u,
+    );
+
+    const statements = recorder.calls.map(({ text }) => compactSql(text));
+    assert.equal(statements.includes("SELECT 'must-not-run';"), false);
+    assert.equal(statements.some((sql) => /^UPDATE public\.schema_migrations/iu.test(sql)), false);
+    assert.equal(statements.at(-1), 'ROLLBACK');
+  });
+
   test('checksum 漂移会在任何待执行正文前失败并回滚', async () => {
     const originalSql = "SELECT 'original';";
     const recorder = createRecordingPool({
@@ -498,6 +637,38 @@ describe('runMigrations', () => {
 
     assert.equal(recorder.releaseArguments[0], recorder.rollbackError);
     assert.deepEqual(logger.entries, [[{ event: 'database_migration_failed' }]]);
+  });
+
+  test('release 失败不覆盖原始迁移错误，成功路径则传播 release 错误', async (t) => {
+    await t.test('保留原始迁移错误', async () => {
+      const sensitiveSql = "SELECT 'migration-body-secret';";
+      const recorder = createRecordingPool({ failOnSql: sensitiveSql, failOnRelease: true });
+
+      await assert.rejects(
+        runMigrations({
+          pool: recorder.pool,
+          migrations: [{ version: '001-failing.sql', sql: sensitiveSql }],
+          logger: createLogger(),
+        }),
+        /migration-secret/u,
+      );
+      assert.equal(recorder.releases, 1);
+    });
+
+    await t.test('无更早错误时传播 release 错误', async () => {
+      const recorder = createRecordingPool({ failOnRelease: true });
+
+      await assert.rejects(
+        runMigrations({
+          pool: recorder.pool,
+          migrations: [{ version: '001-success.sql', sql: 'SELECT 1;' }],
+          logger: createLogger(),
+        }),
+        (error) => error === recorder.releaseError,
+      );
+      assert.equal(compactSql(recorder.calls.at(-1).text), 'COMMIT');
+      assert.equal(recorder.releases, 1);
+    });
   });
 
   test('日志方法 getter 抛错不覆盖已提交结果或原始迁移错误', async (t) => {

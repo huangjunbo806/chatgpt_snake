@@ -82,11 +82,12 @@ export async function resetTestDatabase({ pool } = {}) {
 
   const client = await pool.connect();
   let transactionStarted = false;
+  let operationError;
   let releaseError;
 
   try {
     const identityResult = await client.query(
-      'SELECT current_database() AS database_name, current_user AS user_name',
+      'SELECT pg_catalog.current_database() AS database_name, session_user AS user_name',
     );
     const actualIdentity = identityResult.rows[0];
     if (
@@ -105,6 +106,7 @@ export async function resetTestDatabase({ pool } = {}) {
     await client.query('COMMIT');
     transactionStarted = false;
   } catch (error) {
+    operationError = error;
     if (transactionStarted) {
       try {
         await client.query('ROLLBACK');
@@ -115,7 +117,13 @@ export async function resetTestDatabase({ pool } = {}) {
     }
     throw error;
   } finally {
-    client.release(releaseError);
+    try {
+      client.release(releaseError);
+    } catch (error) {
+      if (!operationError) {
+        throw error;
+      }
+    }
   }
 }
 

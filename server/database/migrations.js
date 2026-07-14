@@ -75,11 +75,20 @@ function verifyAppliedMigrations(migrations, appliedByPrefix) {
   const migrationsByPrefix = new Map(migrations.map((migration) => (
     [migration.version.slice(0, 3), migration]
   )));
+  const maximumLocalPrefix = migrations.at(-1)?.version.slice(0, 3) ?? null;
   const checksumBackfills = [];
+  let hasFutureMigration = false;
 
   for (const [prefix, applied] of appliedByPrefix) {
     const migration = migrationsByPrefix.get(prefix);
     if (!migration) {
+      if (maximumLocalPrefix === null || prefix > maximumLocalPrefix) {
+        if (applied.checksum === null) {
+          throw new Error('旧版未来迁移记录缺少 checksum，无法由当前代码建立完整性基线');
+        }
+        hasFutureMigration = true;
+        continue;
+      }
       if (applied.checksum === null) {
         throw new Error('旧版迁移完整性记录无法升级，必须提供包含全部已应用版本的完整迁移集合');
       }
@@ -93,6 +102,22 @@ function verifyAppliedMigrations(migrations, appliedByPrefix) {
     } else if (applied.checksum !== migration.checksum) {
       throw new Error(`迁移 ${migration.version} 的 SHA-256 校验和与已应用记录不一致`);
     }
+  }
+
+  let pendingMigrationSeen = false;
+  let pendingMigrationCount = 0;
+  for (const migration of migrations) {
+    const isApplied = appliedByPrefix.has(migration.version.slice(0, 3));
+    if (!isApplied) {
+      pendingMigrationSeen = true;
+      pendingMigrationCount += 1;
+    } else if (pendingMigrationSeen) {
+      throw new Error('已应用迁移必须构成本地迁移的连续前缀');
+    }
+  }
+
+  if (hasFutureMigration && pendingMigrationCount > 0) {
+    throw new Error('存在未来迁移记录时，本地迁移必须全部已应用');
   }
 
   return checksumBackfills;
@@ -164,6 +189,7 @@ export async function runMigrations({ pool, migrations, logger = console } = {})
   }));
   const client = await pool.connect();
   const newlyApplied = [];
+  let migrationError;
   let releaseError;
 
   try {
@@ -226,6 +252,7 @@ export async function runMigrations({ pool, migrations, logger = console } = {})
 
     await client.query('COMMIT');
   } catch (error) {
+    migrationError = error;
     try {
       await client.query('ROLLBACK');
     } catch (rollbackError) {
@@ -235,7 +262,13 @@ export async function runMigrations({ pool, migrations, logger = console } = {})
     safeLog(logger, 'error', { event: 'database_migration_failed' });
     throw error;
   } finally {
-    client.release(releaseError);
+    try {
+      client.release(releaseError);
+    } catch (error) {
+      if (!migrationError) {
+        throw error;
+      }
+    }
   }
 
   for (const version of newlyApplied) {

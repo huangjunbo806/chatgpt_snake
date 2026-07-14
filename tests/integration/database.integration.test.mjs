@@ -94,14 +94,32 @@ if (databaseUrl === null) {
         return;
       }
 
+      let teardownError;
+      let databaseIdentityVerified = false;
       try {
         await resetTestDatabase({ pool });
-      } finally {
+        databaseIdentityVerified = true;
+      } catch (error) {
+        teardownError = error;
+      }
+
+      if (databaseIdentityVerified) {
         try {
           await pool.query('DROP TABLE IF EXISTS public.database_integration_sentinel');
-        } finally {
-          await closeTestPool(pool);
+        } catch (error) {
+          teardownError ??= error;
         }
+      }
+
+      try {
+        await closeTestPool(pool);
+      } catch (error) {
+        teardownError ??= error;
+      }
+      pool = null;
+
+      if (teardownError) {
+        throw teardownError;
       }
     });
 
@@ -383,14 +401,24 @@ if (databaseUrl === null) {
         cookie: { expires: new Date(Date.now() + 60_000).toISOString() },
         userId: created.id,
       };
+      let storeOperationError;
 
       try {
         await callStore(store, 'set', sid, session);
         assert.deepEqual(await callStore(store, 'get', sid), session);
         await callStore(store, 'destroy', sid);
         assert.equal(await callStore(store, 'get', sid), undefined);
+      } catch (error) {
+        storeOperationError = error;
+        throw error;
       } finally {
-        await store.close();
+        try {
+          await store.close();
+        } catch (error) {
+          if (!storeOperationError) {
+            throw error;
+          }
+        }
       }
     });
   });

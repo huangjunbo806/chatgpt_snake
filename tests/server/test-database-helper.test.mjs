@@ -9,6 +9,10 @@ import {
   resetTestDatabase,
 } from '../helpers/test-database.mjs';
 
+const SAFE_IDENTITY_QUERY = (
+  'SELECT pg_catalog.current_database() AS database_name, session_user AS user_name'
+);
+
 class RecordingPool {
   static instances = [];
 
@@ -28,8 +32,12 @@ class ResettablePool {
     this.releaseArguments = [];
     this.operationError = new Error('reset-operation-secret');
     this.rollbackError = new Error('reset-rollback-secret');
+    this.releaseError = new Error('reset-release-secret');
+    this.endError = new Error('reset-end-secret');
     this.failOnSql = null;
     this.failOnRollback = false;
+    this.failOnRelease = false;
+    this.failOnEnd = false;
     this.connectCalls = 0;
     this.releases = 0;
     this.ended = false;
@@ -43,7 +51,7 @@ class ResettablePool {
         if (text === this.failOnSql) {
           throw this.operationError;
         }
-        if (text === 'SELECT current_database() AS database_name, current_user AS user_name') {
+        if (text === SAFE_IDENTITY_QUERY) {
           return {
             rows: [{
               database_name: this.actualDatabaseName,
@@ -59,12 +67,18 @@ class ResettablePool {
       release: (error) => {
         this.releases += 1;
         this.releaseArguments.push(error);
+        if (this.failOnRelease) {
+          throw this.releaseError;
+        }
       },
     };
   }
 
   async end() {
     this.ended = true;
+    if (this.failOnEnd) {
+      throw this.endError;
+    }
   }
 }
 
@@ -180,7 +194,7 @@ describe('测试 Pool 生命周期助手', () => {
     await resetTestDatabase({ pool });
 
     assert.deepEqual(pool.queries, [
-      'SELECT current_database() AS database_name, current_user AS user_name',
+      SAFE_IDENTITY_QUERY,
       'BEGIN',
       'DROP TABLE IF EXISTS public.user_sessions',
       'DROP TABLE IF EXISTS public.users',
@@ -257,7 +271,7 @@ describe('测试 Pool 生命周期助手', () => {
 
   test('身份查询失败时不发送 DDL 并正常释放 client', async () => {
     const pool = createBoundResetPool();
-    pool.failOnSql = 'SELECT current_database() AS database_name, current_user AS user_name';
+    pool.failOnSql = SAFE_IDENTITY_QUERY;
 
     await assert.rejects(
       resetTestDatabase({ pool }),
@@ -267,6 +281,31 @@ describe('测试 Pool 生命周期助手', () => {
     assert.deepEqual(ddlQueries(pool), []);
     assert.equal(pool.releases, 1);
     assert.equal(pool.releaseArguments[0], undefined);
+  });
+
+  test('release 失败不覆盖原始 reset 错误，成功路径则传播 release 错误', async (t) => {
+    await t.test('保留原始 reset 错误', async () => {
+      const pool = createBoundResetPool();
+      pool.failOnSql = 'DROP TABLE IF EXISTS public.user_sessions';
+      pool.failOnRelease = true;
+
+      await assert.rejects(
+        resetTestDatabase({ pool }),
+        (error) => error === pool.operationError,
+      );
+      assert.equal(pool.releases, 1);
+    });
+
+    await t.test('无更早错误时传播 release 错误', async () => {
+      const pool = createBoundResetPool();
+      pool.failOnRelease = true;
+
+      await assert.rejects(
+        resetTestDatabase({ pool }),
+        (error) => error === pool.releaseError,
+      );
+      assert.equal(pool.releases, 1);
+    });
   });
 
   test('resetTestDatabase 的 ROLLBACK 失败时用错误释放 client', async () => {
@@ -282,16 +321,23 @@ describe('测试 Pool 生命周期助手', () => {
     assert.equal(pool.releaseArguments[0], pool.rollbackError);
   });
 
-  test('closeTestPool 等待 pool.end', async () => {
-    const pool = createBoundResetPool();
-    await closeTestPool(pool);
+  test('closeTestPool 等待 pool.end 且即使关闭失败也撤销身份绑定', async (t) => {
+    await t.test('成功关闭', async () => {
+      const pool = createBoundResetPool();
+      await closeTestPool(pool);
 
-    assert.equal(pool.ended, true);
+      assert.equal(pool.ended, true);
+      await assert.rejects(resetTestDatabase({ pool }), /必须由 createTestPool 创建/u);
+      assert.equal(pool.connectCalls, 0);
+    });
 
-    await assert.rejects(
-      resetTestDatabase({ pool }),
-      /必须由 createTestPool 创建/u,
-    );
-    assert.equal(pool.connectCalls, 0);
+    await t.test('关闭失败仍保留 end 原始错误并撤销绑定', async () => {
+      const pool = createBoundResetPool();
+      pool.failOnEnd = true;
+
+      await assert.rejects(closeTestPool(pool), (error) => error === pool.endError);
+      await assert.rejects(resetTestDatabase({ pool }), /必须由 createTestPool 创建/u);
+      assert.equal(pool.connectCalls, 0);
+    });
   });
 });
