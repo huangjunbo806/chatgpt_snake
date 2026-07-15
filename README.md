@@ -1,6 +1,7 @@
 # Docker Snake 全栈学习版
 
-Docker Snake 是一个可以在浏览器运行的贪吃蛇小游戏，也是一个面向初学者的全栈示例。它把 HTML、CSS、JavaScript、Express、PostgreSQL、用户登录、排行榜和本地 Git 管理放在同一个工程中。
+Docker Snake 是一个可以在浏览器运行的贪吃蛇小游戏，也是一个面向初学者的全栈示例。它把 HTML、CSS、JavaScript、Express、PostgreSQL、用户登录、排行榜和本地 Git 管理放在同一个工程中。（本人
+不懂前端和后端技术，纯粹是用GPT5.6做出来的网页，所以其实不一定对，这个文档也是写给自己看的）
 
 当前阶段专注于本地开发。项目暂时不包含 Docker 镜像、镜像仓库、GitHub 上传和服务器部署，这些内容可以在理解本地工程后继续学习。
 
